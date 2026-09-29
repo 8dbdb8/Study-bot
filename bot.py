@@ -21,6 +21,21 @@ from study_log_parser import (
     parse_question_count_input,
     parse_score_percent_input,
 )
+from sg_features import (
+    SG_B_TOPICS,
+    add_sg_mistake,
+    get_sg_b_summary,
+    get_sg_category_progress,
+    get_sg_mistakes,
+    get_sg_plan_status,
+    init_sg_feature_tables,
+    parse_correct_count,
+    record_sg_mistake_attempt,
+    save_sg_b_practice,
+    save_sg_plan,
+    score_from_counts,
+    update_sg_plan_text,
+)
 
 
 # ============================================================
@@ -333,6 +348,7 @@ def init_db():
             user_id INTEGER NOT NULL,
             qualification TEXT,
             activity TEXT,
+            exam_section TEXT,
             questions INTEGER,
             correct_answers INTEGER,
             score_percent REAL,
@@ -472,6 +488,14 @@ def init_db():
             ALTER TABLE study_log_analysis
             ADD COLUMN analysis_warnings TEXT
         """)
+
+    if "exam_section" not in columns:
+        cursor.execute("""
+            ALTER TABLE study_log_analysis
+            ADD COLUMN exam_section TEXT
+        """)
+
+    init_sg_feature_tables(cursor)
 
     cursor.execute("""
         DELETE FROM study_log_category_results
@@ -713,6 +737,7 @@ def save_study_analysis(message, analysis, reply_message_id=None):
             user_id,
             qualification,
             activity,
+            exam_section,
             questions,
             correct_answers,
             score_percent,
@@ -722,13 +747,14 @@ def save_study_analysis(message, analysis, reply_message_id=None):
             analyzed_at,
             reply_message_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
         ON CONFLICT(message_id)
         DO UPDATE SET
             user_id = excluded.user_id,
             qualification = excluded.qualification,
             activity = excluded.activity,
+            exam_section = excluded.exam_section,
             questions = excluded.questions,
             correct_answers = excluded.correct_answers,
             score_percent = excluded.score_percent,
@@ -745,6 +771,7 @@ def save_study_analysis(message, analysis, reply_message_id=None):
         message.author.id,
         analysis.get("qualification"),
         analysis.get("activity"),
+        analysis.get("exam_section"),
         analysis.get("questions"),
         analysis.get("correct_answers"),
         analysis.get("score_percent"),
@@ -876,6 +903,11 @@ def delete_study_log_data(message_id):
         reply_message_id = None
 
     # 先に分野別結果と解析結果を削除
+    cursor.execute("""
+        DELETE FROM sg_b_practice
+        WHERE message_id = ?
+    """, (message_id,))
+
     cursor.execute("""
         DELETE FROM study_log_category_results
         WHERE message_id = ?
@@ -1812,6 +1844,7 @@ def build_structured_sg_analysis(
     return {
         "qualification": "SG",
         "activity": "過去問道場",
+        "exam_section": "A",
         "questions": questions,
         "correct_answers": correct_answers,
         "score_percent": score_percent,
@@ -1930,7 +1963,10 @@ class SGStudyLogModal(
                 status_data
             )
 
-            await log_message.edit(content=reply_text)
+            await log_message.edit(
+                content=reply_text,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
             await interaction.followup.send(
                 f"記録しました：{self.category} / "
                 f"{questions}問 / {score_text}%",
@@ -1958,7 +1994,8 @@ class SGStudyLogModal(
 
 
 class SGCategorySelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, action_label="問題数と正答率を入力"):
+        self.action_label = action_label
         security_categories = set(
             SG_PRACTICE_CATEGORIES[:5]
         )
@@ -1988,7 +2025,7 @@ class SGCategorySelect(discord.ui.Select):
         await interaction.response.edit_message(
             content=(
                 f"選択中：**{self.values[0]}**\n"
-                "「問題数と正答率を入力」を押してください。"
+                f"「{self.action_label}」を押してください。"
             ),
             view=self.view
         )
@@ -2029,6 +2066,268 @@ class SGStudyLogView(discord.ui.View):
                 self.selected_category,
                 self.target_channel
             )
+        )
+
+
+class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
+    reference_input = discord.ui.TextInput(
+        label="問題のURLまたは番号",
+        placeholder="例：https://... または 令和6年 問12",
+        max_length=200,
+    )
+    reason_input = discord.ui.TextInput(
+        label="間違えた理由",
+        placeholder="例：アクセス制御の条件を読み違えた",
+        style=discord.TextStyle.paragraph,
+        max_length=300,
+    )
+    memo_input = discord.ui.TextInput(
+        label="次回確認すること（任意）",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=500,
+    )
+
+    def __init__(self, category):
+        super().__init__()
+        self.category = category
+
+    async def on_submit(self, interaction):
+        try:
+            mistake_id, due = add_sg_mistake(
+                DB_PATH,
+                interaction.user.id,
+                self.category,
+                self.reference_input.value,
+                self.reason_input.value,
+                self.memo_input.value,
+                today=datetime.now(JST).date(),
+            )
+        except ValueError as error:
+            await interaction.response.send_message(
+                str(error), ephemeral=True
+            )
+            return
+
+        await interaction.response.send_message(
+            f"誤答 #{mistake_id} を登録しました。"
+            f"次の復習日：{due.isoformat()}\n"
+            "復習するときは `/reviews` を開いてください。",
+            ephemeral=True,
+        )
+
+
+class SGMistakeView(discord.ui.View):
+    def __init__(self, owner_id):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.selected_category = None
+        self.add_item(SGCategorySelect("誤答を入力"))
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この画面はコマンドを実行した本人専用です。",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="誤答を入力", style=discord.ButtonStyle.primary)
+    async def open_modal(self, interaction, button):
+        if self.selected_category is None:
+            await interaction.response.send_message(
+                "先に分野を選択してください。", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            SGMistakeModal(self.selected_category)
+        )
+
+
+def build_structured_sg_b_analysis(
+    topic, questions, correct_answers, wrong_reason=None, memo=None
+):
+    score = score_from_counts(correct_answers, questions)
+    note_parts = []
+    if wrong_reason and wrong_reason.strip():
+        note_parts.append(f"判断ミス：{wrong_reason.strip()}")
+    if memo and memo.strip():
+        note_parts.append(memo.strip())
+    return {
+        "qualification": "SG",
+        "activity": "科目B演習",
+        "exam_section": "B",
+        "questions": questions,
+        "correct_answers": correct_answers,
+        "score_percent": score,
+        "category_results": [{
+            "major_category": "科目B",
+            "category": topic,
+            "questions": questions,
+            "correct_answers": correct_answers,
+            "score_percent": score,
+        }],
+        "weak_points": [],
+        "notes": " / ".join(note_parts) or None,
+        "analysis_warnings": [],
+    }
+
+
+class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
+    questions_input = discord.ui.TextInput(
+        label="解いた問題数", placeholder="例：5", max_length=4
+    )
+    correct_input = discord.ui.TextInput(
+        label="正解数", placeholder="例：3", max_length=4
+    )
+    reason_input = discord.ui.TextInput(
+        label="判断を間違えた理由（全問正解なら空欄）",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300,
+    )
+    memo_input = discord.ui.TextInput(
+        label="メモ（任意）",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300,
+    )
+
+    def __init__(self, topic, target_channel):
+        super().__init__()
+        self.topic = topic
+        self.target_channel = target_channel
+
+    async def on_submit(self, interaction):
+        try:
+            questions = parse_question_count_input(
+                self.questions_input.value
+            )
+            correct = parse_correct_count(
+                self.correct_input.value, questions
+            )
+            reason = (self.reason_input.value or "").strip()
+            if correct < questions and not reason:
+                raise ValueError("誤答がある場合は判断を間違えた理由を入力してください。")
+        except ValueError as error:
+            await interaction.response.send_message(
+                str(error), ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+        log_message = None
+        saved = False
+        try:
+            log_message = await self.target_channel.send(
+                "SG科目Bの演習結果を記録しています..."
+            )
+            analysis = build_structured_sg_b_analysis(
+                self.topic, questions, correct,
+                reason, self.memo_input.value,
+            )
+            message_for_db = SimpleNamespace(
+                id=log_message.id,
+                guild=interaction.guild,
+                channel=self.target_channel,
+                author=interaction.user,
+                created_at=log_message.created_at,
+                content=(
+                    f"SG科目B {self.topic}を{questions}問中"
+                    f"{correct}問正解。"
+                ),
+            )
+            save_study_log(message_for_db)
+            save_study_analysis(message_for_db, analysis)
+            save_sg_b_practice(
+                DB_PATH, log_message.id, interaction.user.id,
+                self.topic, questions, correct, reason,
+                self.memo_input.value,
+                log_message.created_at.astimezone(JST).date().isoformat(),
+            )
+            saved = True
+            status_data = get_study_status(interaction.user.id, "SG")
+            await log_message.edit(
+                content=build_analysis_reply(analysis, status_data),
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+            await interaction.followup.send(
+                f"科目Bを記録しました：{self.topic} / "
+                f"{correct}/{questions}問正解 "
+                f"({analysis['score_percent']:.1f}%)",
+                ephemeral=True,
+            )
+        except Exception as error:
+            print(f"SG科目B 保存エラー: {error}")
+            if saved:
+                await interaction.followup.send(
+                    "科目BはDBに記録済みですが、Discord表示の更新に"
+                    "失敗しました。`/sgprogress` で確認してください。",
+                    ephemeral=True,
+                )
+                return
+            if log_message is not None:
+                delete_study_log_data(log_message.id)
+                try:
+                    await log_message.edit(
+                        content="科目Bの保存に失敗しました。"
+                    )
+                except discord.HTTPException:
+                    pass
+            await interaction.followup.send(
+                "科目Bを保存できませんでした。実行ログを確認してください。",
+                ephemeral=True,
+            )
+
+
+class SGBTopicSelect(discord.ui.Select):
+    def __init__(self):
+        super().__init__(
+            placeholder="科目Bのテーマを選択",
+            options=[
+                discord.SelectOption(label=topic, value=topic)
+                for topic in SG_B_TOPICS
+            ],
+        )
+
+    async def callback(self, interaction):
+        self.view.selected_topic = self.values[0]
+        await interaction.response.edit_message(
+            content=(
+                f"選択中：**{self.values[0]}**\n"
+                "「演習結果を入力」を押してください。"
+            ),
+            view=self.view,
+        )
+
+
+class SGBPracticeView(discord.ui.View):
+    def __init__(self, owner_id, target_channel):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.target_channel = target_channel
+        self.selected_topic = None
+        self.add_item(SGBTopicSelect())
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この画面はコマンドを実行した本人専用です。",
+            ephemeral=True,
+        )
+        return False
+
+    @discord.ui.button(label="演習結果を入力", style=discord.ButtonStyle.primary)
+    async def open_modal(self, interaction, button):
+        if self.selected_topic is None:
+            await interaction.response.send_message(
+                "先にテーマを選択してください。", ephemeral=True
+            )
+            return
+        await interaction.response.send_modal(
+            SGBPracticeModal(self.selected_topic, self.target_channel)
         )
 
 
@@ -2297,7 +2596,7 @@ async def on_ready():
     print("StudyBot 起動完了！")
     print(f"ログイン中: {bot.user}")
     print(f"AIモデル: {OLLAMA_MODEL}")
-    print("StudyBot Version: 2.5")
+    print("StudyBot Version: 2.6")
     print("--------------------")
 
     # /コマンドを各参加サーバーへ同期
@@ -2677,6 +2976,180 @@ async def sglog(ctx):
 
 
 @bot.hybrid_command(
+    name="mistake",
+    description="SGで間違えた問題を復習リストへ登録"
+)
+async def mistake(ctx):
+    view = SGMistakeView(ctx.author.id)
+    message = "間違えた問題の分野を選択してください。"
+    if getattr(ctx, "interaction", None) is not None:
+        await ctx.send(message, view=view, ephemeral=True)
+    else:
+        await ctx.send(message, view=view)
+
+
+@bot.hybrid_command(
+    name="reviews",
+    description="SGの復習予定を表示"
+)
+@app_commands.describe(all_items="今日以降の予定も表示する")
+async def reviews(ctx, all_items: bool = False):
+    items = get_sg_mistakes(
+        DB_PATH, ctx.author.id,
+        today=datetime.now(JST).date(), due_only=not all_items,
+    )
+    if not items:
+        message = (
+            "未完了の復習はありません。"
+            if all_items else
+            "今日までに復習する問題はありません。"
+            " `/reviews all_items:true` で今後の予定を見られます。"
+        )
+        await ctx.send(message)
+        return
+
+    lines = [
+        "**SG 復習リスト**",
+        f"対象：{len(items)}件",
+    ]
+    for item in items[:10]:
+        reference = discord.utils.escape_mentions(item["question_ref"])
+        reason = discord.utils.escape_markdown(
+            discord.utils.escape_mentions(item["reason"][:80])
+        )
+        memo = item["memo"] or ""
+        lines.append(
+            f"**#{item['id']}** {item['category']} "
+            f"（{item['next_review_on']}）\n"
+            f"{reference}\n理由：{reason}"
+            + (
+                "\nメモ：" + discord.utils.escape_markdown(
+                    discord.utils.escape_mentions(memo[:60])
+                )
+                if memo else ""
+            )
+        )
+    if len(items) > 10:
+        lines.append(f"ほか{len(items) - 10}件")
+    lines.append("再挑戦後は `/review` で結果を登録。")
+    await ctx.send("\n\n".join(lines)[:1900])
+
+
+@bot.hybrid_command(
+    name="review",
+    description="SG誤答の再挑戦結果を登録"
+)
+@app_commands.describe(
+    mistake_id="復習リストに表示されるID",
+    result="今回の再挑戦結果",
+)
+@app_commands.choices(result=[
+    app_commands.Choice(name="正解", value="correct"),
+    app_commands.Choice(name="不正解", value="wrong"),
+])
+async def review(ctx, mistake_id: int, result: str):
+    try:
+        outcome = record_sg_mistake_attempt(
+            DB_PATH, ctx.author.id, mistake_id, result,
+            today=datetime.now(JST).date(),
+        )
+    except ValueError as error:
+        await ctx.send(str(error))
+        return
+
+    if outcome["completed"]:
+        await ctx.send(
+            f"復習 #{mistake_id} は3回連続正解で完了しました。"
+        )
+    else:
+        await ctx.send(
+            f"復習 #{mistake_id} を記録しました。"
+            f"連続正解：{outcome['streak']}/3。"
+            f"次回：{outcome['next_review_on'].isoformat()}"
+        )
+
+
+@bot.hybrid_command(
+    name="sgprogress",
+    description="SGの14分野と科目Bの進捗を表示"
+)
+async def sgprogress(ctx):
+    items, unclassified = get_sg_category_progress(
+        DB_PATH, ctx.author.id
+    )
+    b_summary = get_sg_b_summary(DB_PATH, ctx.author.id)
+    lines = ["**SG 科目A・14分野の進捗**", "**セキュリティ**"]
+    for index, item in enumerate(items):
+        if index == 5:
+            lines.append("\n**その他分野**")
+        questions = item["questions"]
+        score = item["latest_score"]
+        last_date = item["last_study_date"] or "—"
+        if questions == 0:
+            if last_date != "—":
+                score_text = (
+                    f"{score:.1f}%" if score is not None else "未記録"
+                )
+                detail = f"問題数未記録 / 直近{score_text} / {last_date}"
+            else:
+                detail = "未着手"
+        else:
+            score_text = f"{score:.1f}%" if score is not None else "未記録"
+            state = "記録少" if questions < 10 else (
+                "要復習" if score is not None and score < 60 else "学習中"
+            )
+            detail = f"{questions}問 / 直近{score_text} / {last_date} / {state}"
+        lines.append(f"{item['category']}：{detail}")
+    if unclassified:
+        lines.append(f"\n旧ログなど分野未特定：{unclassified}問")
+
+    lines.append("\n**科目B**")
+    if b_summary["questions"]:
+        lines.append(
+            f"{b_summary['questions']}問中"
+            f"{b_summary['correct_answers']}問正解 "
+            f"({b_summary['score_percent']:.1f}%)"
+        )
+        for topic, questions, correct, reason, practiced_on in (
+            b_summary["recent_sessions"]
+        ):
+            line = f"{practiced_on} {topic}：{correct}/{questions}問"
+            if reason:
+                safe_reason = discord.utils.escape_markdown(
+                    discord.utils.escape_mentions(reason[:80])
+                )
+                line += f" / 判断ミス：{safe_reason}"
+            lines.append(line)
+    else:
+        lines.append("まだ記録なし")
+
+    await ctx.send("\n".join(lines)[:1900])
+
+
+@bot.hybrid_command(
+    name="sgb",
+    description="SG科目Bの演習結果を記録"
+)
+async def sgb(ctx):
+    if ctx.guild is None:
+        await ctx.send("サーバー内で入力してください。")
+        return
+    target_channel = discord.utils.get(
+        ctx.guild.text_channels, name=STUDY_LOG_CHANNEL_NAME
+    )
+    if target_channel is None:
+        await ctx.send(f"#{STUDY_LOG_CHANNEL_NAME} が見つかりません。")
+        return
+
+    view = SGBPracticeView(ctx.author.id, target_channel)
+    message = "科目Bで取り組んだケースのテーマを選択してください。"
+    if getattr(ctx, "interaction", None) is not None:
+        await ctx.send(message, view=view, ephemeral=True)
+    else:
+        await ctx.send(message, view=view)
+
+
+@bot.hybrid_command(
     name="logs",
     description="今日の勉強ログを表示"
 )
@@ -3005,14 +3478,19 @@ async def next_study(ctx):
     description="SG合格までの週次学習計画を作成"
 )
 @app_commands.describe(
-    weeks="試験までの残り週数（1〜16週）"
+    weeks="試験までの残り週数（1〜16週）",
+    weekly_questions="1週間の目標問題数（省略時30問）",
 )
-async def plan(ctx, weeks: int):
+async def plan(ctx, weeks: int, weekly_questions: int = 30):
     if not 1 <= weeks <= 16:
         await ctx.send(
             "⚠️ 残り週数は1〜16週で指定してください。\n"
             "例：`/plan weeks:6` または `!plan 6`"
         )
+        return
+
+    if not 1 <= weekly_questions <= 500:
+        await ctx.send("週目標は1〜500問で指定してください。")
         return
 
     qualification = "SG"
@@ -3068,6 +3546,8 @@ async def plan(ctx, weeks: int):
 
 【学習方法】
 情報セキュリティマネジメント過去問道場を中心に学習する。
+毎週の基本目標は{weekly_questions}問。
+未達の場合、翌週は不足分のうち最大{weekly_questions // 2}問を上乗せする。
 
 【現在の記録】
 - 累計問題数：{total_questions}問
@@ -3082,7 +3562,8 @@ async def plan(ctx, weeks: int):
 
 ルール:
 - 第1週から第{weeks}週まで、各週を必ず分ける
-- 各週に「目標問題数」「学習内容」「確認ポイント」を書く
+- 各週に「基本目標{weekly_questions}問」「学習内容」「確認ポイント」を書く
+- 翌週の上乗せは実績確定後にBotが計算するので、将来の実績を推測しない
 - 過去問道場で実行できる具体的な内容にする
 - 分野別記録が少ない場合は、最初に実力測定を入れる
 - 1回の低得点だけで弱点と断定しない
@@ -3102,28 +3583,89 @@ async def plan(ctx, weeks: int):
 進捗を判断する基準を3項目以内で記載する。
 """
 
+    plan_id = save_sg_plan(
+        DB_PATH,
+        ctx.author.id,
+        weeks,
+        weekly_questions,
+        datetime.now(JST).isoformat(),
+        today=datetime.now(JST).date(),
+    )
+
     async with ctx.typing():
         try:
             answer = await ask_ollama(prompt)
 
+            update_sg_plan_text(DB_PATH, plan_id, answer)
+
             await ctx.send(
                 f"🗓️ **SG合格まで{weeks}週間の計画**\n\n"
+                f"基本目標：毎週{weekly_questions}問。"
+                "達成状況は `/plan_status` で確認できます。\n\n"
                 f"{answer}"
             )
 
         except aiohttp.ClientConnectorError:
             await ctx.send(
-                "⚠️ Ollamaに接続できません。\n"
-                "Ollamaが起動しているか確認してください。"
+                f"毎週{weekly_questions}問の数値目標を保存しました。"
+                "`/plan_status` で達成状況を確認できます。\n"
+                "Ollamaに接続できなかったため、文章の計画は未生成です。"
             )
 
         except Exception as e:
             print(f"❌ plan エラー: {e}")
 
             await ctx.send(
-                "⚠️ 学習計画を作成できませんでした。\n"
-                "VS Codeのターミナルを確認してください。"
+                f"毎週{weekly_questions}問の数値目標を保存しました。"
+                "`/plan_status` で達成状況を確認できます。\n"
+                "文章の計画は作成できませんでした。"
             )
+
+
+@bot.hybrid_command(
+    name="plan_status",
+    description="SG週次計画の目標と実績を確認"
+)
+async def plan_status(ctx):
+    status_data = get_sg_plan_status(
+        DB_PATH, ctx.author.id, today=datetime.now(JST).date()
+    )
+    if status_data is None:
+        await ctx.send(
+            "保存済みのSG計画がありません。"
+            "`/plan weeks:6 weekly_questions:30` で作成できます。"
+        )
+        return
+
+    lines = [
+        "**SG 週次計画の達成状況**",
+        f"開始：{status_data['start_on'].isoformat()} / "
+        f"{status_data['weeks']}週間 / "
+        f"基本目標：{status_data['weekly_questions']}問/週",
+    ]
+    for week in status_data["rows"]:
+        label = (
+            "進行中" if week["week"] == status_data["current_week"]
+            else "完了"
+        )
+        lines.append(
+            f"第{week['week']}週 "
+            f"({week['start_on'].isoformat()}〜"
+            f"{week['end_on'].isoformat()})："
+            f"{week['actual']}/{week['target']}問 "
+            f"[{label}]"
+        )
+
+    if status_data["completed"]:
+        lines.append("計画期間は終了しました。")
+    elif status_data["rows"]:
+        current = status_data["rows"][-1]
+        lines.append(f"今週の残り：{current['remaining']}問")
+        lines.append(
+            "週の未達分は翌週に最大で基本目標の50%まで繰り越します。"
+        )
+
+    await ctx.send("\n".join(lines)[:1900])
 
 
 @bot.hybrid_command(

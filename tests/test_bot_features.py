@@ -30,6 +30,26 @@ class StructuredSGLogTests(unittest.TestCase):
             bot_module.bot.get_command("sglog")
         )
 
+    def test_sg_study_commands_are_registered(self):
+        for name in (
+            "mistake", "reviews", "review", "sgprogress",
+            "sgb", "plan_status",
+        ):
+            with self.subTest(name=name):
+                self.assertIsNotNone(
+                    bot_module.bot.get_command(name)
+                )
+
+        b_view = bot_module.SGBPracticeView(123, object())
+        topic_select = next(
+            child for child in b_view.children
+            if isinstance(child, bot_module.SGBTopicSelect)
+        )
+        self.assertEqual(
+            len(topic_select.options),
+            len(bot_module.SG_B_TOPICS),
+        )
+
     def test_sglog_view_has_all_practice_categories(self):
         view = bot_module.SGStudyLogView(
             owner_id=123,
@@ -84,7 +104,10 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
             bot_module.get_week_total_seconds
         )
         original_ask_ollama = bot_module.ask_ollama
+        original_save_plan = bot_module.save_sg_plan
+        original_update_plan = bot_module.update_sg_plan_text
         captured_prompt = None
+        saved_plan = None
 
         def fake_get_status(user_id, qualification):
             self.assertEqual(user_id, 123)
@@ -108,9 +131,17 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
             captured_prompt = prompt
             return "計画本文"
 
+        def fake_save_plan(db_path, user_id, weeks, weekly_questions,
+                           created_at, today=None):
+            nonlocal saved_plan
+            saved_plan = (user_id, weeks, weekly_questions)
+            return 1
+
         bot_module.get_study_status = fake_get_status
         bot_module.get_week_total_seconds = lambda user_id: 3600
         bot_module.ask_ollama = fake_ask_ollama
+        bot_module.save_sg_plan = fake_save_plan
+        bot_module.update_sg_plan_text = lambda *args: None
 
         try:
             ctx = _Context()
@@ -121,6 +152,8 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
                 original_get_week_total
             )
             bot_module.ask_ollama = original_ask_ollama
+            bot_module.save_sg_plan = original_save_plan
+            bot_module.update_sg_plan_text = original_update_plan
 
         self.assertIn("残り6週間", captured_prompt)
         self.assertIn(
@@ -128,6 +161,7 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
             captured_prompt,
         )
         self.assertIn("SG合格まで6週間", ctx.messages[0])
+        self.assertEqual(saved_plan, (123, 6, 30))
 
     async def test_plan_rejects_out_of_range_weeks(self):
         ctx = _Context()
