@@ -10,6 +10,11 @@ import discord
 from discord.ext import commands
 from dotenv import load_dotenv
 
+from study_log_parser import (
+    SG_MAJOR_CATEGORIES,
+    normalize_study_analysis,
+)
+
 
 # ============================================================
 # 基本設定
@@ -94,6 +99,123 @@ def parse_iso_datetime(value):
         return None
 
 
+def _decode_json_list(value):
+    if not value:
+        return []
+
+    try:
+        decoded = json.loads(value)
+    except (json.JSONDecodeError, TypeError):
+        return []
+
+    return decoded if isinstance(decoded, list) else []
+
+
+def _replace_category_results(
+    cursor,
+    message_id,
+    category_results
+):
+    cursor.execute("""
+        DELETE FROM study_log_category_results
+        WHERE message_id = ?
+    """, (
+        message_id,
+    ))
+
+    for result in category_results:
+        cursor.execute("""
+            INSERT INTO study_log_category_results (
+                message_id,
+                major_category,
+                category,
+                questions,
+                correct_answers,
+                score_percent
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            message_id,
+            result.get("major_category"),
+            result.get("category"),
+            result.get("questions"),
+            result.get("correct_answers"),
+            result.get("score_percent")
+        ))
+
+
+def _backfill_existing_study_analysis(cursor):
+    cursor.execute("""
+        SELECT
+            l.message_id,
+            l.content,
+            a.qualification,
+            a.activity,
+            a.questions,
+            a.correct_answers,
+            a.score_percent,
+            a.weak_points,
+            a.notes
+        FROM study_logs AS l
+        JOIN study_log_analysis AS a
+            ON a.message_id = l.message_id
+    """)
+
+    rows = cursor.fetchall()
+
+    for row in rows:
+        raw_analysis = {
+            "qualification": row[2],
+            "activity": row[3],
+            "questions": row[4],
+            "correct_answers": row[5],
+            "score_percent": row[6],
+            "weak_points": _decode_json_list(row[7]),
+            "notes": row[8],
+        }
+        analysis = normalize_study_analysis(
+            row[1],
+            raw_analysis,
+            current_qualification="SG"
+        )
+
+        cursor.execute("""
+            UPDATE study_log_analysis
+            SET
+                qualification = ?,
+                activity = ?,
+                questions = ?,
+                correct_answers = ?,
+                score_percent = ?,
+                weak_points = ?,
+                notes = ?,
+                analysis_warnings = ?
+            WHERE message_id = ?
+        """, (
+            analysis["qualification"],
+            analysis["activity"],
+            analysis["questions"],
+            analysis["correct_answers"],
+            analysis["score_percent"],
+            json.dumps(
+                analysis["weak_points"],
+                ensure_ascii=False
+            ),
+            analysis["notes"],
+            json.dumps(
+                analysis["analysis_warnings"],
+                ensure_ascii=False
+            ),
+            row[0]
+        ))
+
+        _replace_category_results(
+            cursor,
+            row[0],
+            analysis["category_results"]
+        )
+
+
 # ============================================================
 # データベース初期化・マイグレーション
 # ============================================================
@@ -153,12 +275,45 @@ def init_db():
             qualification TEXT,
             activity TEXT,
             questions INTEGER,
+            correct_answers INTEGER,
             score_percent REAL,
             weak_points TEXT,
             notes TEXT,
+            analysis_warnings TEXT,
             analyzed_at TEXT NOT NULL,
             reply_message_id INTEGER
         )
+    """)
+
+    cursor.execute("""
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = 'table'
+        AND name = 'study_log_category_results'
+    """)
+    category_table_existed = (
+        cursor.fetchone() is not None
+    )
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS study_log_category_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            message_id INTEGER NOT NULL,
+            major_category TEXT NOT NULL,
+            category TEXT,
+            questions INTEGER,
+            correct_answers INTEGER,
+            score_percent REAL,
+            FOREIGN KEY (message_id)
+                REFERENCES study_log_analysis(message_id)
+                ON DELETE CASCADE
+        )
+    """)
+
+    cursor.execute("""
+        CREATE INDEX IF NOT EXISTS
+        idx_study_log_category_message
+        ON study_log_category_results(message_id)
     """)
 
     # 資格取得ロードマップ
@@ -190,30 +345,16 @@ def init_db():
             0
         ),
         (
-            "Oracle Master Silver SQL",
-            "Oracle Master Silver SQL",
+            "医療情報技師",
+            "医療情報技師",
             3,
-            "pending",
-            0
-        ),
-        (
-            "Oracle Java Silver",
-            "Oracle Java Silver",
-            4,
-            "pending",
-            0
-        ),
-        (
-            "医療情報技師",
-            "医療情報技師",
-            5,
             "pending",
             0
         )
     ]
 
     cursor.executemany("""
-        INSERT OR IGNORE INTO certification_roadmap (
+        INSERT INTO certification_roadmap (
             qualification,
             display_name,
             sort_order,
@@ -221,7 +362,19 @@ def init_db():
             is_current
         )
         VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(qualification)
+        DO UPDATE SET
+            display_name = excluded.display_name,
+            sort_order = excluded.sort_order
     """, default_roadmap)
+
+    cursor.execute("""
+        DELETE FROM certification_roadmap
+        WHERE qualification IN (
+            'Oracle Master Silver SQL',
+            'Oracle Java Silver'
+        )
+    """)
 
     # 既存DB向けマイグレーション
     cursor.execute("PRAGMA table_info(study_log_analysis)")
@@ -230,11 +383,52 @@ def init_db():
         for row in cursor.fetchall()
     }
 
+    needs_analysis_backfill = (
+        "correct_answers" not in columns
+        or "analysis_warnings" not in columns
+        or not category_table_existed
+    )
+
     if "reply_message_id" not in columns:
         cursor.execute("""
             ALTER TABLE study_log_analysis
             ADD COLUMN reply_message_id INTEGER
         """)
+
+    if "correct_answers" not in columns:
+        cursor.execute("""
+            ALTER TABLE study_log_analysis
+            ADD COLUMN correct_answers INTEGER
+        """)
+
+    if "analysis_warnings" not in columns:
+        cursor.execute("""
+            ALTER TABLE study_log_analysis
+            ADD COLUMN analysis_warnings TEXT
+        """)
+
+    cursor.execute("""
+        DELETE FROM study_log_category_results
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM study_logs
+            WHERE study_logs.message_id =
+                study_log_category_results.message_id
+        )
+    """)
+
+    cursor.execute("""
+        DELETE FROM study_log_analysis
+        WHERE NOT EXISTS (
+            SELECT 1
+            FROM study_logs
+            WHERE study_logs.message_id =
+                study_log_analysis.message_id
+        )
+    """)
+
+    if needs_analysis_backfill:
+        _backfill_existing_study_analysis(cursor)
 
     conn.commit()
     conn.close()
@@ -429,13 +623,15 @@ def save_study_analysis(message, analysis, reply_message_id=None):
             qualification,
             activity,
             questions,
+            correct_answers,
             score_percent,
             weak_points,
             notes,
+            analysis_warnings,
             analyzed_at,
             reply_message_id
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 
         ON CONFLICT(message_id)
         DO UPDATE SET
@@ -443,9 +639,11 @@ def save_study_analysis(message, analysis, reply_message_id=None):
             qualification = excluded.qualification,
             activity = excluded.activity,
             questions = excluded.questions,
+            correct_answers = excluded.correct_answers,
             score_percent = excluded.score_percent,
             weak_points = excluded.weak_points,
             notes = excluded.notes,
+            analysis_warnings = excluded.analysis_warnings,
             analyzed_at = excluded.analyzed_at,
             reply_message_id = COALESCE(
                 excluded.reply_message_id,
@@ -457,15 +655,26 @@ def save_study_analysis(message, analysis, reply_message_id=None):
         analysis.get("qualification"),
         analysis.get("activity"),
         analysis.get("questions"),
+        analysis.get("correct_answers"),
         analysis.get("score_percent"),
         json.dumps(
             analysis.get("weak_points", []),
             ensure_ascii=False
         ),
         analysis.get("notes"),
+        json.dumps(
+            analysis.get("analysis_warnings", []),
+            ensure_ascii=False
+        ),
         datetime.now(JST).isoformat(),
         reply_message_id
     ))
+
+    _replace_category_results(
+        cursor,
+        message.id,
+        analysis.get("category_results", [])
+    )
 
     conn.commit()
     conn.close()
@@ -575,7 +784,14 @@ def delete_study_log_data(message_id):
         qualification = None
         reply_message_id = None
 
-    # 先に解析結果を削除
+    # 先に分野別結果と解析結果を削除
+    cursor.execute("""
+        DELETE FROM study_log_category_results
+        WHERE message_id = ?
+    """, (
+        message_id,
+    ))
+
     cursor.execute("""
         DELETE FROM study_log_analysis
         WHERE message_id = ?
@@ -678,10 +894,33 @@ qualification は次のどれかにしてください。
 
 SG
 FE
-Oracle Master Silver SQL
-Oracle Java Silver
 医療情報技師
 不明
+
+SGの分野名は次の固定値だけを使ってください。
+
+大分類:
+- テクノロジ系
+- マネジメント系
+- ストラテジ系
+
+中分類:
+- セキュリティ
+- 情報セキュリティ
+- 情報セキュリティ管理
+- セキュリティ技術評価
+- 情報セキュリティ対策
+- セキュリティ実装技術
+- システム構成要素
+- データベース
+- ネットワーク
+- プロジェクトマネジメント
+- サービスマネジメント
+- システム監査
+- 法務
+- システム戦略
+- システム企画
+- 企業活動
 
 必ず以下のJSON形式だけを返してください。
 
@@ -689,18 +928,32 @@ Oracle Java Silver
   "qualification": "SG",
   "activity": "過去問道場",
   "questions": 20,
+  "correct_answers": 12,
   "score_percent": null,
+  "category_results": [
+    {
+      "major_category": "テクノロジ系",
+      "category": "ネットワーク",
+      "questions": null,
+      "correct_answers": null,
+      "score_percent": 40.0
+    }
+  ],
   "weak_points": ["ネットワーク"],
   "notes": null
 }
 
 ルール:
 - 不明な値は null
+- category_results がなければ []
 - weak_points がなければ []
-- 「難しかった」「苦手だった」と書かれた分野は weak_points に入れる
+- SGの分野は上記の固定値以外を作らない
+- 大分類だけ書かれている場合、category は null
+- 「難しかった」「苦手だった」と書かれた固定分野は weak_points に入れる
 - weak_points の要素数は誤答数ではない
 - 正答率は数値だけにする
 - 問題数は実際に書かれた数だけを使う
+- 正解数は実際に書かれた場合だけを使う
 """
             },
             {
@@ -841,13 +1094,16 @@ def get_study_status(user_id, qualification="SG"):
 
     cursor.execute("""
         SELECT
-            questions,
-            score_percent,
-            weak_points
-        FROM study_log_analysis
-        WHERE user_id = ?
-        AND qualification = ?
-        ORDER BY analyzed_at ASC
+            a.questions,
+            a.correct_answers,
+            a.score_percent,
+            a.weak_points
+        FROM study_log_analysis AS a
+        JOIN study_logs AS l
+            ON a.message_id = l.message_id
+        WHERE a.user_id = ?
+        AND a.qualification = ?
+        ORDER BY a.analyzed_at ASC
     """, (
         user_id,
         qualification
@@ -866,6 +1122,7 @@ def get_study_status(user_id, qualification="SG"):
 
     for (
         questions,
+        correct_answers,
         score_percent,
         weak_points_json
     ) in rows:
@@ -882,10 +1139,15 @@ def get_study_status(user_id, qualification="SG"):
                 questions is not None
                 and questions > 0
             ):
-                weighted_score_sum += (
-                    score_percent
-                    * questions
-                )
+                if correct_answers is not None:
+                    weighted_score_sum += (
+                        correct_answers * 100
+                    )
+                else:
+                    weighted_score_sum += (
+                        score_percent
+                        * questions
+                    )
 
                 weighted_question_sum += (
                     questions
@@ -928,6 +1190,111 @@ def get_study_status(user_id, qualification="SG"):
     }
 
 
+def get_category_status(user_id, qualification="SG"):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT
+            c.major_category,
+            c.category,
+            c.questions,
+            c.correct_answers,
+            c.score_percent
+        FROM study_log_category_results AS c
+        JOIN study_log_analysis AS a
+            ON c.message_id = a.message_id
+        JOIN study_logs AS l
+            ON a.message_id = l.message_id
+        WHERE a.user_id = ?
+        AND a.qualification = ?
+        ORDER BY l.study_date ASC, l.created_at ASC
+    """, (
+        user_id,
+        qualification
+    ))
+
+    rows = cursor.fetchall()
+    conn.close()
+
+    grouped = {}
+
+    for (
+        major_category,
+        category,
+        questions,
+        correct_answers,
+        score_percent
+    ) in rows:
+        key = (major_category, category)
+        data = grouped.setdefault(key, {
+            "log_count": 0,
+            "weighted_score_sum": 0,
+            "weighted_question_sum": 0,
+            "fallback_scores": [],
+        })
+        data["log_count"] += 1
+
+        if score_percent is None:
+            continue
+
+        if questions is not None and questions > 0:
+            if correct_answers is not None:
+                data["weighted_score_sum"] += (
+                    correct_answers * 100
+                )
+            else:
+                data["weighted_score_sum"] += (
+                    score_percent * questions
+                )
+
+            data["weighted_question_sum"] += questions
+        else:
+            data["fallback_scores"].append(
+                score_percent
+            )
+
+    major_order = {
+        name: index
+        for index, name in enumerate(
+            SG_MAJOR_CATEGORIES
+        )
+    }
+    result = []
+
+    for (major_category, category), data in grouped.items():
+        if data["weighted_question_sum"] > 0:
+            average_score = (
+                data["weighted_score_sum"]
+                / data["weighted_question_sum"]
+            )
+        elif data["fallback_scores"]:
+            average_score = (
+                sum(data["fallback_scores"])
+                / len(data["fallback_scores"])
+            )
+        else:
+            average_score = None
+
+        result.append({
+            "major_category": major_category,
+            "category": category,
+            "average_score": average_score,
+            "log_count": data["log_count"],
+        })
+
+    return sorted(
+        result,
+        key=lambda item: (
+            major_order.get(
+                item["major_category"],
+                len(major_order),
+            ),
+            item["category"] or "",
+        ),
+    )
+
+
 def get_week_analysis_status(
     user_id,
     qualification="SG"
@@ -947,6 +1314,7 @@ def get_week_analysis_status(
     cursor.execute("""
         SELECT
             a.questions,
+            a.correct_answers,
             a.score_percent,
             a.weak_points
         FROM study_log_analysis AS a
@@ -981,6 +1349,7 @@ def get_week_analysis_status(
 
     for (
         questions,
+        correct_answers,
         score_percent,
         weak_points_json
     ) in rows:
@@ -997,10 +1366,15 @@ def get_week_analysis_status(
                 questions is not None
                 and questions > 0
             ):
-                weighted_score_sum += (
-                    score_percent
-                    * questions
-                )
+                if correct_answers is not None:
+                    weighted_score_sum += (
+                        correct_answers * 100
+                    )
+                else:
+                    weighted_score_sum += (
+                        score_percent
+                        * questions
+                    )
 
                 weighted_question_sum += (
                     questions
@@ -1126,8 +1500,16 @@ def build_analysis_reply(
 
     activity = analysis.get("activity")
     questions = analysis.get("questions")
+    correct_answers = analysis.get(
+        "correct_answers"
+    )
     score_percent = analysis.get(
         "score_percent"
+    )
+
+    category_results = (
+        analysis.get("category_results")
+        or []
     )
 
     weak_points = (
@@ -1136,6 +1518,10 @@ def build_analysis_reply(
     )
 
     notes = analysis.get("notes")
+    analysis_warnings = (
+        analysis.get("analysis_warnings")
+        or []
+    )
 
     activity_text = (
         activity
@@ -1152,6 +1538,45 @@ def build_analysis_reply(
     score_text = (
         f"{score_percent:g}%"
         if score_percent is not None
+        else "記録なし"
+    )
+
+    if (
+        correct_answers is not None
+        and questions is not None
+    ):
+        correct_text = (
+            f"{correct_answers}/{questions}問"
+        )
+    else:
+        correct_text = "記録なし"
+
+    category_lines = []
+
+    for result in category_results:
+        major = result.get("major_category")
+        category = result.get("category")
+        category_score = result.get(
+            "score_percent"
+        )
+
+        if not major:
+            continue
+
+        label = (
+            f"{major} > {category}"
+            if category
+            else major
+        )
+
+        if category_score is not None:
+            label += f"（{category_score:g}%）"
+
+        category_lines.append(label)
+
+    category_text = (
+        "、".join(category_lines)
+        if category_lines
         else "記録なし"
     )
 
@@ -1178,7 +1603,9 @@ def build_analysis_reply(
         f"📘 資格：**{qualification}**",
         f"📝 内容：**{activity_text}**",
         f"🔢 問題数：**{questions_text}**",
+        f"⭕ 正解数：**{correct_text}**",
         f"🎯 正答率：**{score_text}**",
+        f"📚 分野：**{category_text}**",
         f"⚠️ 弱点：**{weak_text}**",
     ]
 
@@ -1186,6 +1613,16 @@ def build_analysis_reply(
         reply_lines.append(
             f"💬 メモ：{notes}"
         )
+
+    if analysis_warnings:
+        reply_lines.extend([
+            "",
+            "⚠️ **入力内容を確認してください**",
+            *(
+                f"- {warning}"
+                for warning in analysis_warnings
+            ),
+        ])
 
     if (
         qualification != "不明"
@@ -1268,8 +1705,24 @@ async def process_study_log_message(
     try:
         print("🤖 Ollamaで解析中...")
 
-        analysis = await analyze_study_log(
+        raw_analysis = await analyze_study_log(
             message.content
+        )
+
+        current_qualification = (
+            get_current_qualification()
+        )
+        current_qualification_code = (
+            current_qualification["qualification"]
+            if current_qualification
+            else "SG"
+        )
+        analysis = normalize_study_analysis(
+            message.content,
+            raw_analysis,
+            current_qualification=(
+                current_qualification_code
+            )
         )
 
         # 先に解析結果を保存
@@ -1481,13 +1934,6 @@ async def recover_active_voice_sessions():
 
 
 # ============================================================
-# DB準備
-# ============================================================
-
-init_db()
-
-
-# ============================================================
 # Bot起動・Slash Command同期
 # ============================================================
 
@@ -1497,7 +1943,7 @@ async def on_ready():
     print("StudyBot 起動完了！")
     print(f"ログイン中: {bot.user}")
     print(f"AIモデル: {OLLAMA_MODEL}")
-    print("StudyBot Version: 2.2")
+    print("StudyBot Version: 2.3")
     print("--------------------")
 
     # /コマンドを各参加サーバーへ同期
@@ -1949,6 +2395,11 @@ async def status(ctx):
         status_data["weak_points"]
     )
 
+    category_status = get_category_status(
+        ctx.author.id,
+        qualification
+    )
+
     log_count = (
         status_data["log_count"]
     )
@@ -1982,11 +2433,39 @@ async def status(ctx):
     else:
         weak_text = "まだ記録なし"
 
+    if category_status:
+        category_lines = []
+
+        for item in category_status:
+            label = item["major_category"]
+
+            if item["category"]:
+                label += f" > {item['category']}"
+
+            if item["average_score"] is not None:
+                value = (
+                    f"{item['average_score']:.1f}%"
+                )
+            else:
+                value = (
+                    f"記録{item['log_count']}回"
+                )
+
+            category_lines.append(
+                f"- {label}：{value}"
+            )
+
+        category_text = "\n".join(category_lines)
+    else:
+        category_text = "まだ記録なし"
+
     await ctx.send(
         f"📊 **{qualification} 学習状況**\n\n"
         f"📝 解析済みログ：{log_count}件\n"
         f"🔢 解いた問題：{total_questions}問\n"
         f"🎯 平均正答率：{score_text}\n\n"
+        "📚 **分野別成績**\n"
+        f"{category_text}\n\n"
         "⚠️ **弱点ランキング**\n"
         f"{weak_text}"
     )
@@ -2357,9 +2836,7 @@ async def ai(ctx):
 【資格取得ロードマップ】
 1. 情報セキュリティマネジメント（SG）
 2. 基本情報技術者（FE）
-3. Oracle Master Silver SQL
-4. Oracle Java Silver
-5. 医療情報技師
+3. 医療情報技師
 
 現在は情報セキュリティマネジメント（SG）を
 最優先で勉強しています。
@@ -2595,9 +3072,8 @@ async def on_voice_state_update(
             f"📝 今日やった内容をこの "
             f"**#{STUDY_LOG_CHANNEL_NAME}** "
             "に書いてね！\n"
-            "例：`SGの過去問道場を30問。"
-            "正答率80%。"
-            "ネットワークが難しかった。`"
+            "例：`SG過去問道場25問中10問正解。"
+            "テクノロジ系のセキュリティを学習。`"
         )
 
 
@@ -2605,11 +3081,16 @@ async def on_voice_state_update(
 # Token確認 / 起動
 # ============================================================
 
-if TOKEN is None:
-    raise RuntimeError(
-        "DISCORD_TOKENが読み込めませんでした。"
-        ".envを確認してください。"
-    )
+def main():
+    if TOKEN is None:
+        raise RuntimeError(
+            "DISCORD_TOKENが読み込めませんでした。"
+            ".envを確認してください。"
+        )
+
+    init_db()
+    bot.run(TOKEN)
 
 
-bot.run(TOKEN)
+if __name__ == "__main__":
+    main()
