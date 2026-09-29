@@ -26,9 +26,9 @@ class NormalizeStudyAnalysisTests(unittest.TestCase):
                 {
                     "major_category": "テクノロジ系",
                     "category": "セキュリティ",
-                    "questions": None,
-                    "correct_answers": None,
-                    "score_percent": None,
+                    "questions": 25,
+                    "correct_answers": 10,
+                    "score_percent": 40.0,
                 }
             ],
         )
@@ -43,6 +43,19 @@ class NormalizeStudyAnalysisTests(unittest.TestCase):
         self.assertEqual(analysis["correct_answers"], 7)
         self.assertEqual(analysis["score_percent"], 70.0)
         self.assertTrue(analysis["analysis_warnings"])
+
+    def test_does_not_assign_overall_score_without_all_scope(self):
+        analysis = normalize_study_analysis(
+            "SG過去問道場10問。正答率40%。"
+            "セキュリティを学習。",
+            {},
+        )
+
+        self.assertIsNone(
+            analysis["category_results"][0][
+                "score_percent"
+            ]
+        )
 
     def test_rejects_impossible_question_and_percent_pair(self):
         analysis = normalize_study_analysis(

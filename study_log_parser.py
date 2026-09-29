@@ -589,6 +589,21 @@ def normalize_study_analysis(
         content,
         warnings,
     )
+
+    if (
+        score_percent is not None
+        and len(category_results) == 1
+        and category_results[0]["score_percent"] is None
+        and re.search(r"(?:全て|すべて|全部)", content)
+    ):
+        category_results[0]["questions"] = questions
+        category_results[0]["correct_answers"] = (
+            correct_answers
+        )
+        category_results[0]["score_percent"] = (
+            score_percent
+        )
+
     weak_points = _normalize_weak_points(
         raw_analysis.get("weak_points"),
         warnings,

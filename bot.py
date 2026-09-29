@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 
 import aiohttp
 import discord
+from discord import app_commands
 from discord.ext import commands
 from dotenv import load_dotenv
 
@@ -42,6 +43,9 @@ JST = ZoneInfo("Asia/Tokyo")
 
 # DB
 DB_PATH = "data/study.db"
+
+# 分野別正答率がこの値未満なら要復習候補
+REVIEW_SCORE_THRESHOLD = 60.0
 
 
 # ============================================================
@@ -97,6 +101,30 @@ def parse_iso_datetime(value):
 
     except ValueError:
         return None
+
+
+def format_category_label(item):
+    major = item.get("major_category")
+    category = item.get("category")
+
+    if category:
+        return f"{major} > {category}"
+
+    return major or "分野不明"
+
+
+def get_review_candidates(items, score_key):
+    candidates = [
+        item
+        for item in items
+        if item.get(score_key) is not None
+        and item[score_key] < REVIEW_SCORE_THRESHOLD
+    ]
+
+    return sorted(
+        candidates,
+        key=lambda item: item[score_key]
+    )
 
 
 def _decode_json_list(value):
@@ -164,12 +192,37 @@ def _backfill_existing_study_analysis(cursor):
     rows = cursor.fetchall()
 
     for row in rows:
+        cursor.execute("""
+            SELECT
+                major_category,
+                category,
+                questions,
+                correct_answers,
+                score_percent
+            FROM study_log_category_results
+            WHERE message_id = ?
+            ORDER BY id ASC
+        """, (
+            row[0],
+        ))
+        category_results = [
+            {
+                "major_category": category_row[0],
+                "category": category_row[1],
+                "questions": category_row[2],
+                "correct_answers": category_row[3],
+                "score_percent": category_row[4],
+            }
+            for category_row in cursor.fetchall()
+        ]
+
         raw_analysis = {
             "qualification": row[2],
             "activity": row[3],
             "questions": row[4],
             "correct_answers": row[5],
             "score_percent": row[6],
+            "category_results": category_results,
             "weak_points": _decode_json_list(row[7]),
             "notes": row[8],
         }
@@ -316,6 +369,13 @@ def init_db():
         ON study_log_category_results(message_id)
     """)
 
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS schema_migrations (
+            name TEXT PRIMARY KEY,
+            applied_at TEXT NOT NULL
+        )
+    """)
+
     # 資格取得ロードマップ
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS certification_roadmap (
@@ -429,6 +489,31 @@ def init_db():
 
     if needs_analysis_backfill:
         _backfill_existing_study_analysis(cursor)
+
+    review_migration = (
+        "20260929_objective_review_candidates"
+    )
+    cursor.execute("""
+        SELECT 1
+        FROM schema_migrations
+        WHERE name = ?
+    """, (
+        review_migration,
+    ))
+
+    if cursor.fetchone() is None:
+        _backfill_existing_study_analysis(cursor)
+
+        cursor.execute("""
+            INSERT INTO schema_migrations (
+                name,
+                applied_at
+            )
+            VALUES (?, ?)
+        """, (
+            review_migration,
+            datetime.now(JST).isoformat()
+        ))
 
     conn.commit()
     conn.close()
@@ -939,18 +1024,14 @@ SGの分野名は次の固定値だけを使ってください。
       "score_percent": 40.0
     }
   ],
-  "weak_points": ["ネットワーク"],
   "notes": null
 }
 
 ルール:
 - 不明な値は null
 - category_results がなければ []
-- weak_points がなければ []
 - SGの分野は上記の固定値以外を作らない
 - 大分類だけ書かれている場合、category は null
-- 「難しかった」「苦手だった」と書かれた固定分野は weak_points に入れる
-- weak_points の要素数は誤答数ではない
 - 正答率は数値だけにする
 - 問題数は実際に書かれた数だけを使う
 - 正解数は実際に書かれた場合だけを使う
@@ -1186,11 +1267,20 @@ def get_study_status(user_id, qualification="SG"):
         "average_score": average_score,
         "weak_points":
             weak_point_counter.most_common(5),
-        "log_count": len(rows)
+        "log_count": len(rows),
+        "category_status": get_category_status(
+            user_id,
+            qualification
+        )
     }
 
 
-def get_category_status(user_id, qualification="SG"):
+def get_category_status(
+    user_id,
+    qualification="SG",
+    start_date=None,
+    end_date=None
+):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
@@ -1208,10 +1298,16 @@ def get_category_status(user_id, qualification="SG"):
             ON a.message_id = l.message_id
         WHERE a.user_id = ?
         AND a.qualification = ?
+        AND (? IS NULL OR l.study_date >= ?)
+        AND (? IS NULL OR l.study_date <= ?)
         ORDER BY l.study_date ASC, l.created_at ASC
     """, (
         user_id,
-        qualification
+        qualification,
+        start_date,
+        start_date,
+        end_date,
+        end_date
     ))
 
     rows = cursor.fetchall()
@@ -1229,6 +1325,7 @@ def get_category_status(user_id, qualification="SG"):
         key = (major_category, category)
         data = grouped.setdefault(key, {
             "log_count": 0,
+            "scored_log_count": 0,
             "weighted_score_sum": 0,
             "weighted_question_sum": 0,
             "fallback_scores": [],
@@ -1237,6 +1334,8 @@ def get_category_status(user_id, qualification="SG"):
 
         if score_percent is None:
             continue
+
+        data["scored_log_count"] += 1
 
         if questions is not None and questions > 0:
             if correct_answers is not None:
@@ -1281,6 +1380,9 @@ def get_category_status(user_id, qualification="SG"):
             "category": category,
             "average_score": average_score,
             "log_count": data["log_count"],
+            "scored_log_count": data[
+                "scored_log_count"
+            ],
         })
 
     return sorted(
@@ -1438,8 +1540,8 @@ async def ask_ollama(prompt):
                     "簡潔かつ具体的に回答してください。"
                     "記録されている事実をもとに分析してください。"
                     "記録がないことを『実施していない』と断定しないでください。"
-                    "弱点として記録された回数を、誤答数や間違えた問題数として"
-                    "解釈しないでください。"
+                    "1回の低得点だけで弱点と断定しないでください。"
+                    "60%未満の分野は要復習候補として扱ってください。"
                     "記録された実績とAIからの提案を区別してください。"
                     "勉強量を過度に褒めず、次に取るべき行動を明確にしてください。"
                     "Discordで読みやすい形式にしてください。"
@@ -1512,11 +1614,6 @@ def build_analysis_reply(
         or []
     )
 
-    weak_points = (
-        analysis.get("weak_points")
-        or []
-    )
-
     notes = analysis.get("notes")
     analysis_warnings = (
         analysis.get("analysis_warnings")
@@ -1580,10 +1677,18 @@ def build_analysis_reply(
         else "記録なし"
     )
 
-    weak_text = (
-        "、".join(weak_points)
-        if weak_points
-        else "記録なし"
+    review_candidates = get_review_candidates(
+        category_results,
+        "score_percent"
+    )
+    review_text = (
+        "、".join(
+            f"{format_category_label(item)}"
+            f"（{item['score_percent']:g}%）"
+            for item in review_candidates
+        )
+        if review_candidates
+        else "なし"
     )
 
     if edited:
@@ -1606,7 +1711,7 @@ def build_analysis_reply(
         f"⭕ 正解数：**{correct_text}**",
         f"🎯 正答率：**{score_text}**",
         f"📚 分野：**{category_text}**",
-        f"⚠️ 弱点：**{weak_text}**",
+        f"🔁 要復習候補：**{review_text}**",
     ]
 
     if notes:
@@ -1636,8 +1741,8 @@ def build_analysis_reply(
             status_data["average_score"]
         )
 
-        cumulative_weak_points = (
-            status_data["weak_points"]
+        cumulative_categories = (
+            status_data.get("category_status", [])
         )
 
         if cumulative_average is not None:
@@ -1649,14 +1754,22 @@ def build_analysis_reply(
                 "記録なし"
             )
 
-        if cumulative_weak_points:
-            top_weak_text = "、".join(
-                f"{name}({count}回)"
-                for name, count
-                in cumulative_weak_points[:3]
+        cumulative_review_candidates = (
+            get_review_candidates(
+                cumulative_categories,
+                "average_score"
+            )
+        )
+
+        if cumulative_review_candidates:
+            cumulative_review_text = "、".join(
+                f"{format_category_label(item)}"
+                f"（{item['average_score']:.1f}% / "
+                f"{item['scored_log_count']}回）"
+                for item in cumulative_review_candidates[:3]
             )
         else:
-            top_weak_text = "記録なし"
+            cumulative_review_text = "なし"
 
         reply_lines.extend([
             "",
@@ -1670,8 +1783,8 @@ def build_analysis_reply(
                 f"**{cumulative_score_text}**"
             ),
             (
-                f"⚠️ 弱点上位："
-                f"**{top_weak_text}**"
+                f"🔁 要復習候補："
+                f"**{cumulative_review_text}**"
             ),
         ])
 
@@ -1943,7 +2056,7 @@ async def on_ready():
     print("StudyBot 起動完了！")
     print(f"ログイン中: {bot.user}")
     print(f"AIモデル: {OLLAMA_MODEL}")
-    print("StudyBot Version: 2.3")
+    print("StudyBot Version: 2.4")
     print("--------------------")
 
     # /コマンドを各参加サーバーへ同期
@@ -2391,13 +2504,8 @@ async def status(ctx):
         status_data["average_score"]
     )
 
-    weak_points = (
-        status_data["weak_points"]
-    )
-
-    category_status = get_category_status(
-        ctx.author.id,
-        qualification
+    category_status = (
+        status_data["category_status"]
     )
 
     log_count = (
@@ -2419,28 +2527,11 @@ async def status(ctx):
     else:
         score_text = "記録なし"
 
-    if weak_points:
-        weak_text = "\n".join(
-            f"{index}. {name}：{count}回"
-            for index, (
-                name,
-                count
-            ) in enumerate(
-                weak_points,
-                start=1
-            )
-        )
-    else:
-        weak_text = "まだ記録なし"
-
     if category_status:
         category_lines = []
 
         for item in category_status:
-            label = item["major_category"]
-
-            if item["category"]:
-                label += f" > {item['category']}"
+            label = format_category_label(item)
 
             if item["average_score"] is not None:
                 value = (
@@ -2459,6 +2550,21 @@ async def status(ctx):
     else:
         category_text = "まだ記録なし"
 
+    review_candidates = get_review_candidates(
+        category_status,
+        "average_score"
+    )
+
+    if review_candidates:
+        review_text = "\n".join(
+            f"- {format_category_label(item)}："
+            f"{item['average_score']:.1f}% "
+            f"（{'重点復習' if item['scored_log_count'] >= 2 else '候補'}）"
+            for item in review_candidates
+        )
+    else:
+        review_text = "現在はなし"
+
     await ctx.send(
         f"📊 **{qualification} 学習状況**\n\n"
         f"📝 解析済みログ：{log_count}件\n"
@@ -2466,8 +2572,8 @@ async def status(ctx):
         f"🎯 平均正答率：{score_text}\n\n"
         "📚 **分野別成績**\n"
         f"{category_text}\n\n"
-        "⚠️ **弱点ランキング**\n"
-        f"{weak_text}"
+        "🔁 **要復習候補**\n"
+        f"{review_text}"
     )
 
 
@@ -2510,8 +2616,8 @@ async def next_study(ctx):
         status_data["average_score"]
     )
 
-    weak_points = (
-        status_data["weak_points"]
+    category_status = (
+        status_data["category_status"]
     )
 
     if average_score is not None:
@@ -2521,15 +2627,20 @@ async def next_study(ctx):
     else:
         score_text = "記録なし"
 
-    if weak_points:
-        weak_text = "\n".join(
-            f"- {name}：{count}回"
-            for name, count
-            in weak_points
+    review_candidates = get_review_candidates(
+        category_status,
+        "average_score"
+    )
+
+    if review_candidates:
+        review_text = "\n".join(
+            f"- {format_category_label(item)}："
+            f"{item['average_score']:.1f}%"
+            for item in review_candidates
         )
     else:
-        weak_text = (
-            "まだ弱点記録なし"
+        review_text = (
+            "現在はなし"
         )
 
     prompt = f"""
@@ -2550,11 +2661,12 @@ async def next_study(ctx):
 【問題数で重み付けした平均正答率】
 {score_text}
 
-【弱点として記録された分野】
-{weak_text}
+【分野別正答率から見た要復習候補】
+{review_text}
 
 重要:
-- 弱点の「○回」は、○問間違えたという意味ではない
+- 1回の結果だけで弱点と断定しない
+- 60%未満の分野は要復習候補として扱う
 - 記録のない実績を作らない
 - ユーザーは過去問道場を中心に勉強している
 
@@ -2591,6 +2703,132 @@ async def next_study(ctx):
                 "作成できませんでした。\n"
                 "VS Codeのターミナルを"
                 "確認してください。"
+            )
+
+
+@bot.hybrid_command(
+    name="plan",
+    description="SG合格までの週次学習計画を作成"
+)
+@app_commands.describe(
+    weeks="試験までの残り週数（1〜16週）"
+)
+async def plan(ctx, weeks: int):
+    if not 1 <= weeks <= 16:
+        await ctx.send(
+            "⚠️ 残り週数は1〜16週で指定してください。\n"
+            "例：`/plan weeks:6` または `!plan 6`"
+        )
+        return
+
+    qualification = "SG"
+    status_data = get_study_status(
+        ctx.author.id,
+        qualification
+    )
+    total_questions = status_data["total_questions"]
+    average_score = status_data["average_score"]
+    category_status = status_data["category_status"]
+    week_seconds = get_week_total_seconds(
+        ctx.author.id
+    )
+
+    score_text = (
+        f"{average_score:.1f}%"
+        if average_score is not None
+        else "記録なし"
+    )
+
+    category_text = (
+        "\n".join(
+            f"- {format_category_label(item)}："
+            + (
+                f"{item['average_score']:.1f}% "
+                f"（採点{item['scored_log_count']}回）"
+                if item["average_score"] is not None
+                else f"正答率なし（記録{item['log_count']}回）"
+            )
+            for item in category_status
+        )
+        if category_status
+        else "記録なし"
+    )
+
+    review_candidates = get_review_candidates(
+        category_status,
+        "average_score"
+    )
+    review_text = (
+        "\n".join(
+            f"- {format_category_label(item)}："
+            f"{item['average_score']:.1f}%"
+            for item in review_candidates
+        )
+        if review_candidates
+        else "現在はなし"
+    )
+
+    prompt = f"""
+情報セキュリティマネジメント（SG）を
+残り{weeks}週間で合格するための学習計画を作成してください。
+
+【学習方法】
+情報セキュリティマネジメント過去問道場を中心に学習する。
+
+【現在の記録】
+- 累計問題数：{total_questions}問
+- 平均正答率：{score_text}
+- 今週ここまでの勉強時間：{format_duration(week_seconds)}
+
+【分野別成績】
+{category_text}
+
+【要復習候補（60%未満）】
+{review_text}
+
+ルール:
+- 第1週から第{weeks}週まで、各週を必ず分ける
+- 各週に「目標問題数」「学習内容」「確認ポイント」を書く
+- 過去問道場で実行できる具体的な内容にする
+- 分野別記録が少ない場合は、最初に実力測定を入れる
+- 1回の低得点だけで弱点と断定しない
+- 最終週は総合演習と誤答の見直しを中心にする
+- 記録にない実績を作らない
+- 全体を1200文字以内にする
+
+次の形式で回答してください。
+
+### 全体方針
+短くまとめる。
+
+### 週ごとの計画
+第1週から第{weeks}週まで記載する。
+
+### 毎週の確認
+進捗を判断する基準を3項目以内で記載する。
+"""
+
+    async with ctx.typing():
+        try:
+            answer = await ask_ollama(prompt)
+
+            await ctx.send(
+                f"🗓️ **SG合格まで{weeks}週間の計画**\n\n"
+                f"{answer}"
+            )
+
+        except aiohttp.ClientConnectorError:
+            await ctx.send(
+                "⚠️ Ollamaに接続できません。\n"
+                "Ollamaが起動しているか確認してください。"
+            )
+
+        except Exception as e:
+            print(f"❌ plan エラー: {e}")
+
+            await ctx.send(
+                "⚠️ 学習計画を作成できませんでした。\n"
+                "VS Codeのターミナルを確認してください。"
             )
 
 
@@ -2668,12 +2906,6 @@ async def report(ctx):
         ]
     )
 
-    weak_points = (
-        report_status[
-            "weak_points"
-        ]
-    )
-
     log_count = (
         report_status[
             "log_count"
@@ -2687,14 +2919,39 @@ async def report(ctx):
     else:
         score_text = "記録なし"
 
-    if weak_points:
-        weak_text = "\n".join(
-            f"- {name}：{count}回"
-            for name, count
-            in weak_points
+    week_categories = get_category_status(
+        ctx.author.id,
+        qualification,
+        report_status["start_date"],
+        report_status["end_date"]
+    )
+    category_text = (
+        "\n".join(
+            f"- {format_category_label(item)}："
+            + (
+                f"{item['average_score']:.1f}%"
+                if item["average_score"] is not None
+                else f"記録{item['log_count']}回"
+            )
+            for item in week_categories
         )
-    else:
-        weak_text = "記録なし"
+        if week_categories
+        else "記録なし"
+    )
+
+    review_candidates = get_review_candidates(
+        week_categories,
+        "average_score"
+    )
+    review_text = (
+        "\n".join(
+            f"- {format_category_label(item)}："
+            f"{item['average_score']:.1f}%"
+            for item in review_candidates
+        )
+        if review_candidates
+        else "現在はなし"
+    )
 
     if (
         total_seconds == 0
@@ -2730,13 +2987,14 @@ async def report(ctx):
 【問題数で重み付けした平均正答率】
 {score_text}
 
-【弱点】
-{weak_text}
+【分野別成績】
+{category_text}
+
+【要復習候補（60%未満）】
+{review_text}
 
 【データの読み方に関する重要ルール】
-- 「ネットワーク：1回」のような弱点回数は、
-  その分野が弱点として1件のログに記録されたという意味
-- 「1問間違えた」「1回誤答した」と解釈しない
+- 1回の結果だけで弱点と断定しない
 - 曜日別一覧に存在しない曜日を
   「勉強していない」と断定しない
 - 集計期間終了日より後の曜日や未来の日付を評価しない
@@ -2756,7 +3014,7 @@ async def report(ctx):
 ### 来週の方針
 AIからの提案として3項目以内で提案する。
 過去問道場を中心に、
-弱点対策と総合問題をバランスよく提案する。
+要復習候補と総合問題をバランスよく提案する。
 """
 
     async with ctx.typing():
@@ -2824,6 +3082,27 @@ async def ai(ctx):
             "ありません。"
         )
 
+    today = datetime.now(JST).strftime("%Y-%m-%d")
+    today_categories = get_category_status(
+        ctx.author.id,
+        "SG",
+        today,
+        today
+    )
+    review_candidates = get_review_candidates(
+        today_categories,
+        "average_score"
+    )
+    review_text = (
+        "\n".join(
+            f"- {format_category_label(item)}："
+            f"{item['average_score']:.1f}%"
+            for item in review_candidates
+        )
+        if review_candidates
+        else "現在はなし"
+    )
+
     prompt = f"""
 今日の学習状況を分析してください。
 
@@ -2832,6 +3111,9 @@ async def ai(ctx):
 
 【今日の勉強ログ】
 {log_text}
+
+【今日の要復習候補（分野別正答率60%未満）】
+{review_text}
 
 【資格取得ロードマップ】
 1. 情報セキュリティマネジメント（SG）
@@ -2846,8 +3128,8 @@ async def ai(ctx):
 ### 今日できたこと
 今日の記録から実施した内容をまとめる。
 
-### 弱点・気になる点
-ログから判断できる弱点を整理する。
+### 要復習候補・気になる点
+ログから判断できる復習候補を整理する。
 分からないことは推測しすぎない。
 
 ### 次回やること
