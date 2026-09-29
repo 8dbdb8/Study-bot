@@ -1,6 +1,7 @@
 import math
 import re
 import unicodedata
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 
 SUPPORTED_QUALIFICATIONS = (
@@ -14,6 +15,23 @@ SG_MAJOR_CATEGORIES = (
     "テクノロジ系",
     "マネジメント系",
     "ストラテジ系",
+)
+
+SG_PRACTICE_CATEGORIES = (
+    "情報セキュリティ",
+    "情報セキュリティ管理",
+    "セキュリティ技術評価",
+    "情報セキュリティ対策",
+    "セキュリティ実装技術",
+    "システム構成要素",
+    "データベース",
+    "ネットワーク",
+    "プロジェクトマネジメント",
+    "サービスマネジメント",
+    "システム監査",
+    "システム戦略",
+    "システム企画",
+    "企業活動",
 )
 
 SG_CATEGORY_TO_MAJOR = {
@@ -61,6 +79,80 @@ _CATEGORY_ALIASES = {
     "セキュリティ実装": "セキュリティ実装技術",
     "法律": "法務",
 }
+
+
+def parse_question_count_input(value):
+    text = _normalize_text(value)
+
+    if not re.fullmatch(r"\d+", text):
+        raise ValueError(
+            "問題数は1以上の整数で入力してください。"
+        )
+
+    questions = int(text)
+
+    if not 1 <= questions <= 1000:
+        raise ValueError(
+            "問題数は1〜1000問で入力してください。"
+        )
+
+    return questions
+
+
+def parse_score_percent_input(value):
+    text = _normalize_text(value).removesuffix("%").strip()
+
+    if not re.fullmatch(r"\d+(?:\.\d+)?", text):
+        raise ValueError(
+            "正答率は0〜100の数字で入力してください。"
+        )
+
+    try:
+        score = Decimal(text)
+    except InvalidOperation as error:
+        raise ValueError(
+            "正答率を読み取れませんでした。"
+        ) from error
+
+    if not Decimal("0") <= score <= Decimal("100"):
+        raise ValueError(
+            "正答率は0〜100で入力してください。"
+        )
+
+    return float(
+        score.quantize(
+            Decimal("0.1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+
+
+def infer_correct_answers(questions, score_percent):
+    question_decimal = Decimal(questions)
+    score_decimal = Decimal(str(score_percent))
+    estimated = int(
+        (
+            question_decimal
+            * score_decimal
+            / Decimal("100")
+        ).quantize(
+            Decimal("1"),
+            rounding=ROUND_HALF_UP,
+        )
+    )
+    reconstructed = (
+        Decimal(estimated)
+        / question_decimal
+        * Decimal("100")
+    ).quantize(
+        Decimal("0.1"),
+        rounding=ROUND_HALF_UP,
+    )
+
+    if reconstructed == score_decimal:
+        return estimated
+
+    return None
 
 
 def _normalize_text(value):

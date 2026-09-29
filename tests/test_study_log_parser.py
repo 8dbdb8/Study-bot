@@ -1,6 +1,52 @@
 import unittest
 
-from study_log_parser import normalize_study_analysis
+from study_log_parser import (
+    infer_correct_answers,
+    normalize_study_analysis,
+    parse_question_count_input,
+    parse_score_percent_input,
+)
+
+
+class StructuredInputTests(unittest.TestCase):
+    def test_parses_full_width_question_count(self):
+        self.assertEqual(
+            parse_question_count_input("２５"),
+            25,
+        )
+
+    def test_rejects_invalid_question_counts(self):
+        for value in ("0", "1.5", "1001"):
+            with self.subTest(value=value):
+                with self.assertRaises(ValueError):
+                    parse_question_count_input(value)
+
+    def test_rounds_score_half_up_to_one_decimal_place(self):
+        self.assertEqual(
+            parse_score_percent_input("40.25"),
+            40.3,
+        )
+        self.assertEqual(
+            parse_score_percent_input("４０．２４％"),
+            40.2,
+        )
+
+    def test_rejects_out_of_range_score(self):
+        with self.assertRaises(ValueError):
+            parse_score_percent_input("100.1")
+
+    def test_infers_correct_answers_only_when_consistent(self):
+        self.assertEqual(
+            infer_correct_answers(25, 40.0),
+            10,
+        )
+        self.assertEqual(
+            infer_correct_answers(3, 66.7),
+            2,
+        )
+        self.assertIsNone(
+            infer_correct_answers(1, 66.0)
+        )
 
 
 class NormalizeStudyAnalysisTests(unittest.TestCase):

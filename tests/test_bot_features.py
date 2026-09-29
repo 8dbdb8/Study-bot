@@ -24,6 +24,59 @@ class _Context:
         self.messages.append(content)
 
 
+class StructuredSGLogTests(unittest.TestCase):
+    def test_sglog_command_is_registered(self):
+        self.assertIsNotNone(
+            bot_module.bot.get_command("sglog")
+        )
+
+    def test_sglog_view_has_all_practice_categories(self):
+        view = bot_module.SGStudyLogView(
+            owner_id=123,
+            target_channel=object(),
+        )
+        select = next(
+            child
+            for child in view.children
+            if isinstance(child, bot_module.SGCategorySelect)
+        )
+
+        self.assertEqual(len(select.options), 14)
+        self.assertEqual(
+            [option.value for option in select.options],
+            list(bot_module.SG_PRACTICE_CATEGORIES),
+        )
+
+    def test_builds_exact_structured_analysis(self):
+        analysis = bot_module.build_structured_sg_analysis(
+            "情報セキュリティ",
+            25,
+            40.3,
+            "アクセス制御を復習",
+        )
+
+        self.assertEqual(analysis["qualification"], "SG")
+        self.assertEqual(analysis["questions"], 25)
+        self.assertEqual(analysis["score_percent"], 40.3)
+        self.assertIsNone(analysis["correct_answers"])
+        self.assertEqual(
+            analysis["category_results"],
+            [
+                {
+                    "major_category": "テクノロジ系",
+                    "category": "情報セキュリティ",
+                    "questions": 25,
+                    "correct_answers": None,
+                    "score_percent": 40.3,
+                }
+            ],
+        )
+        self.assertEqual(
+            analysis["notes"],
+            "アクセス制御を復習",
+        )
+
+
 class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_plan_uses_recorded_category_scores(self):
         original_get_status = bot_module.get_study_status

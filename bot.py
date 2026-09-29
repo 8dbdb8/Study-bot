@@ -3,6 +3,7 @@ import json
 import sqlite3
 from collections import Counter
 from datetime import datetime, timedelta
+from types import SimpleNamespace
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -12,8 +13,13 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from study_log_parser import (
+    SG_CATEGORY_TO_MAJOR,
     SG_MAJOR_CATEGORIES,
+    SG_PRACTICE_CATEGORIES,
+    infer_correct_answers,
     normalize_study_analysis,
+    parse_question_count_input,
+    parse_score_percent_input,
 )
 
 
@@ -1791,6 +1797,241 @@ def build_analysis_reply(
     return "\n".join(reply_lines)
 
 
+def build_structured_sg_analysis(
+    category,
+    questions,
+    score_percent,
+    notes=None
+):
+    major_category = SG_CATEGORY_TO_MAJOR[category]
+    correct_answers = infer_correct_answers(
+        questions,
+        score_percent
+    )
+
+    return {
+        "qualification": "SG",
+        "activity": "過去問道場",
+        "questions": questions,
+        "correct_answers": correct_answers,
+        "score_percent": score_percent,
+        "category_results": [
+            {
+                "major_category": major_category,
+                "category": category,
+                "questions": questions,
+                "correct_answers": correct_answers,
+                "score_percent": score_percent,
+            }
+        ],
+        "weak_points": [],
+        "notes": notes.strip() if notes and notes.strip() else None,
+        "analysis_warnings": [],
+    }
+
+
+class SGStudyLogModal(
+    discord.ui.Modal,
+    title="SG過去問道場ログ"
+):
+    questions_input = discord.ui.TextInput(
+        label="解いた問題数",
+        placeholder="例：25",
+        required=True,
+        min_length=1,
+        max_length=4
+    )
+    score_input = discord.ui.TextInput(
+        label="正答率（%）",
+        placeholder="例：40 または 40.25",
+        required=True,
+        min_length=1,
+        max_length=7
+    )
+    notes_input = discord.ui.TextInput(
+        label="メモ（任意）",
+        placeholder="気になった用語や次回見直す内容",
+        style=discord.TextStyle.paragraph,
+        required=False,
+        max_length=300
+    )
+
+    def __init__(self, category, target_channel):
+        super().__init__()
+        self.category = category
+        self.target_channel = target_channel
+
+    async def on_submit(self, interaction):
+        try:
+            questions = parse_question_count_input(
+                self.questions_input.value
+            )
+            score_percent = parse_score_percent_input(
+                self.score_input.value
+            )
+        except ValueError as error:
+            await interaction.response.send_message(
+                f"⚠️ {error}",
+                ephemeral=True
+            )
+            return
+
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                "⚠️ SGログはサーバー内で入力してください。",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        log_message = None
+
+        try:
+            log_message = await self.target_channel.send(
+                "SG勉強ログを記録しています..."
+            )
+            major_category = SG_CATEGORY_TO_MAJOR[
+                self.category
+            ]
+            score_text = f"{score_percent:.1f}"
+            content = (
+                f"SG過去問道場{questions}問。"
+                f"正答率{score_text}%。"
+                f"全て{major_category}の"
+                f"{self.category}分野。"
+            )
+            message_for_db = SimpleNamespace(
+                id=log_message.id,
+                guild=interaction.guild,
+                channel=self.target_channel,
+                author=interaction.user,
+                created_at=log_message.created_at,
+                content=content
+            )
+            analysis = build_structured_sg_analysis(
+                self.category,
+                questions,
+                score_percent,
+                self.notes_input.value
+            )
+
+            save_study_log(message_for_db)
+            save_study_analysis(
+                message_for_db,
+                analysis
+            )
+            status_data = get_study_status(
+                interaction.user.id,
+                "SG"
+            )
+            reply_text = build_analysis_reply(
+                analysis,
+                status_data
+            )
+
+            await log_message.edit(content=reply_text)
+            await interaction.followup.send(
+                f"記録しました：{self.category} / "
+                f"{questions}問 / {score_text}%",
+                ephemeral=True
+            )
+
+        except Exception as error:
+            print(f"❌ sglog 保存エラー: {error}")
+
+            if log_message is not None:
+                try:
+                    await log_message.edit(
+                        content=(
+                            "⚠️ SG勉強ログの保存に失敗しました。"
+                        )
+                    )
+                except discord.HTTPException:
+                    pass
+
+            await interaction.followup.send(
+                "⚠️ SG勉強ログを保存できませんでした。\n"
+                "VS Codeのターミナルを確認してください。",
+                ephemeral=True
+            )
+
+
+class SGCategorySelect(discord.ui.Select):
+    def __init__(self):
+        security_categories = set(
+            SG_PRACTICE_CATEGORIES[:5]
+        )
+        options = [
+            discord.SelectOption(
+                label=category,
+                value=category,
+                description=(
+                    "セキュリティ"
+                    if category in security_categories
+                    else "その他分野"
+                )
+            )
+            for category in SG_PRACTICE_CATEGORIES
+        ]
+
+        super().__init__(
+            placeholder="学習した分野を1つ選択",
+            min_values=1,
+            max_values=1,
+            options=options
+        )
+
+    async def callback(self, interaction):
+        self.view.selected_category = self.values[0]
+
+        await interaction.response.edit_message(
+            content=(
+                f"選択中：**{self.values[0]}**\n"
+                "「問題数と正答率を入力」を押してください。"
+            ),
+            view=self.view
+        )
+
+
+class SGStudyLogView(discord.ui.View):
+    def __init__(self, owner_id, target_channel):
+        super().__init__(timeout=180)
+        self.owner_id = owner_id
+        self.target_channel = target_channel
+        self.selected_category = None
+        self.add_item(SGCategorySelect())
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+
+        await interaction.response.send_message(
+            "この入力画面はコマンドを実行した本人専用です。",
+            ephemeral=True
+        )
+        return False
+
+    @discord.ui.button(
+        label="問題数と正答率を入力",
+        style=discord.ButtonStyle.primary
+    )
+    async def open_modal(self, interaction, button):
+        if self.selected_category is None:
+            await interaction.response.send_message(
+                "先に学習した分野を選択してください。",
+                ephemeral=True
+            )
+            return
+
+        await interaction.response.send_modal(
+            SGStudyLogModal(
+                self.selected_category,
+                self.target_channel
+            )
+        )
+
+
 # ============================================================
 # 勉強ログを保存 → AI解析 → Discord返信
 # 新規投稿と編集の両方で使う
@@ -2056,7 +2297,7 @@ async def on_ready():
     print("StudyBot 起動完了！")
     print(f"ログイン中: {bot.user}")
     print(f"AIモデル: {OLLAMA_MODEL}")
-    print("StudyBot Version: 2.4")
+    print("StudyBot Version: 2.5")
     print("--------------------")
 
     # /コマンドを各参加サーバーへ同期
@@ -2380,6 +2621,59 @@ async def week(ctx):
         "⏱️ **合計："
         f"{format_duration(total_seconds)}**"
     )
+
+
+@bot.hybrid_command(
+    name="sglog",
+    description="SG過去問道場の学習結果を入力"
+)
+async def sglog(ctx):
+    is_interaction = getattr(ctx, "interaction", None) is not None
+
+    if ctx.guild is None:
+        message = "SGログはサーバー内で入力してください。"
+        if is_interaction:
+            await ctx.send(message, ephemeral=True)
+        else:
+            await ctx.send(message)
+        return
+
+    target_channel = discord.utils.get(
+        ctx.guild.text_channels,
+        name=STUDY_LOG_CHANNEL_NAME
+    )
+
+    if target_channel is None:
+        message = (
+            f"#{STUDY_LOG_CHANNEL_NAME} チャンネルが"
+            "見つかりません。"
+        )
+        if is_interaction:
+            await ctx.send(message, ephemeral=True)
+        else:
+            await ctx.send(message)
+        return
+
+    view = SGStudyLogView(
+        ctx.author.id,
+        target_channel
+    )
+    message = (
+        "学習した分野を1つ選択してください。\n"
+        "続けて問題数と正答率を数字で入力します。\n"
+        "正答率は小数第2位を四捨五入し、"
+        "小数第1位で保存します。\n"
+        "複数分野は分野ごとに登録してください。"
+    )
+
+    if is_interaction:
+        await ctx.send(
+            message,
+            view=view,
+            ephemeral=True
+        )
+    else:
+        await ctx.send(message, view=view)
 
 
 @bot.hybrid_command(
