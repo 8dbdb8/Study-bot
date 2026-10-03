@@ -4,6 +4,7 @@ from datetime import datetime
 
 import aiohttp
 import discord
+from discord import app_commands
 
 from studybot.config import JST
 from studybot.embeds import COLOR_DEFAULT, format_minutes
@@ -12,6 +13,10 @@ from studybot.formatting import (
     format_category_label,
     format_duration,
     get_review_candidates,
+)
+from studybot.features.notion_export import (
+    is_notion_configured,
+    save_weekly_report_to_notion,
 )
 from studybot.groups import ai_group
 from studybot.ollama import ask_ollama
@@ -318,8 +323,11 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
     return embed
 
 
-async def create_weekly_report_embed(user_id):
-    """今週の週報。記録がなければ None。AIが使えなくても数字だけで作る。"""
+async def create_weekly_report(user_id):
+    """今週の週報の (集計, AIの文章, AIのエラー)。記録がなければ None。
+
+    AIが使えないときは文章が None になり、数字だけで週報を作れる。
+    """
     data = collect_weekly_report(user_id)
     if data is None:
         return None
@@ -327,31 +335,55 @@ async def create_weekly_report_embed(user_id):
     try:
         answer = await ask_ollama(build_weekly_report_prompt(data))
     except aiohttp.ClientConnectorError:
-        return build_weekly_report_embed(
-            data, ai_error="Ollamaに接続できません"
-        )
+        return data, None, "Ollamaに接続できません"
     except Exception as e:
         print(f"[report] AIの処理に失敗: {e}")
-        return build_weekly_report_embed(data, ai_error="AIの処理に失敗")
-    return build_weekly_report_embed(data, answer)
+        return data, None, "AIの処理に失敗"
+    return data, answer, None
+
+
+async def create_weekly_report_embed(user_id):
+    """今週の週報の Embed。記録がなければ None。"""
+    report = await create_weekly_report(user_id)
+    if report is None:
+        return None
+    return build_weekly_report_embed(*report)
 
 
 @ai_group.command(
     name="report",
     description="今週のSG学習レポートをAIが作成"
 )
-async def report(ctx):
+@app_commands.describe(
+    notion="Notionにも週ページとして保存する（.env の設定が必要）"
+)
+async def report(ctx, notion: bool = False):
     async with ctx.typing():
-        embed = await create_weekly_report_embed(ctx.author.id)
+        report_data = await create_weekly_report(ctx.author.id)
+        if report_data is None:
+            await ctx.send(
+                "📊 今週はまだ週報を作れる"
+                "学習記録がありません。"
+            )
+            return
 
-    if embed is None:
-        await ctx.send(
-            "📊 今週はまだ週報を作れる"
-            "学習記録がありません。"
-        )
-        return
+        content = None
+        if notion:
+            if is_notion_configured():
+                content = await save_weekly_report_to_notion(
+                    ctx.author.id, *report_data,
+                    datetime.now(JST).date(),
+                )
+            else:
+                content = (
+                    "Notionの設定がまだです。.env に NOTION_TOKEN と "
+                    "NOTION_PAGE_ID を書いてから再起動してください。"
+                )
 
-    await ctx.send(embed=embed)
+    kwargs = {"embed": build_weekly_report_embed(*report_data)}
+    if content:
+        kwargs["content"] = content
+    await ctx.send(**kwargs)
 
 
 @ai_group.command(

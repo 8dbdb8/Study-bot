@@ -1,4 +1,4 @@
-"""週間レポートを毎週日曜21時に自動で届ける。"""
+"""週間レポートを毎週日曜21時に自動で届ける（Notionの設定があればNotionにも保存）。"""
 
 import asyncio
 from datetime import datetime
@@ -8,8 +8,12 @@ from discord.ext import tasks
 
 from studybot import config
 from studybot.config import JST, WEEKLY_REPORT_TIME, WEEKLY_REPORT_WEEKDAY
-from studybot.features.ai import create_weekly_report_embed
+from studybot.features.ai import (
+    build_weekly_report_embed,
+    create_weekly_report,
+)
 from studybot.features.digest import find_home_channel
+from studybot.features.notion_export import save_weekly_report_to_notion
 from studybot.weekly_report import (
     get_weekly_report_candidates,
     mark_weekly_report_sent,
@@ -22,13 +26,18 @@ async def send_weekly_report(bot, user_id, today):
     if channel is None:
         return False
 
-    embed = await create_weekly_report_embed(user_id)
-    if embed is None:
+    report = await create_weekly_report(user_id)
+    if report is None:
         return False
 
+    content = f"<@{user_id}> 今週もおつかれさまでした。週間レポートです。"
+    notion_note = await save_weekly_report_to_notion(user_id, *report, today)
+    if notion_note:
+        content += f"\n{notion_note}"
+
     message = await channel.send(
-        content=f"<@{user_id}> 今週もおつかれさまでした。週間レポートです。",
-        embed=embed,
+        content=content,
+        embed=build_weekly_report_embed(*report),
         allowed_mentions=discord.AllowedMentions(
             users=[discord.Object(id=user_id)]
         ),

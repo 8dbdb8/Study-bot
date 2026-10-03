@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 
 from studybot.daily_digest import parse_digest_time
+from studybot.notion import extract_notion_id
 
 
 # プロジェクトのフォルダ（bot.py がある場所）
@@ -66,4 +67,9 @@ DIGEST_CATCH_UP_UNTIL_HOUR = 22
 WEEKLY_REPORT_WEEKDAY = 6
 WEEKLY_REPORT_TIME = time(21, 0)
 
-BOT_VERSION = "3.0"
+# Notion への週間レポートの保存（両方そろったときだけ動く）
+NOTION_TOKEN = os.getenv("NOTION_TOKEN") or None
+# 保存先ページのURLかID。インテグレーションに共有しておく
+NOTION_PAGE_ID = extract_notion_id(os.getenv("NOTION_PAGE_ID", ""))
+
+BOT_VERSION = "3.1"

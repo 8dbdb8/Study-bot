@@ -136,10 +136,14 @@ class SendWeeklyReportTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         async def fake_report(user_id):
             if user_id == 2:
                 return None
-            return discord.Embed(title=f"report {user_id}")
+            return DATA, f"report {user_id}", None
+
+        async def no_notion(*args):
+            return None
 
         now = datetime(2026, 10, 18, 21, 0, tzinfo=config.JST)
-        with patch.object(weekly_feature, "create_weekly_report_embed", fake_report):
+        with patch.object(weekly_feature, "create_weekly_report", fake_report), \
+                patch.object(weekly_feature, "save_weekly_report_to_notion", no_notion):
             self.assertEqual(await weekly_feature.send_weekly_reports(fake_bot, now), 1)
             self.assertEqual(await weekly_feature.send_weekly_reports(fake_bot, now), 0)
 
@@ -148,7 +152,30 @@ class SendWeeklyReportTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             sent[0]["content"], "<@1> 今週もおつかれさまでした。週間レポートです。"
         )
-        self.assertEqual(sent[0]["embed"].title, "report 1")
+        self.assertEqual(sent[0]["embed"].description, "report 1")
+
+    async def test_adds_notion_result_line(self):
+        guild = _Guild()
+        fake_bot = SimpleNamespace(get_guild=lambda guild_id: guild)
+        self.add_session(1, "2026-10-16")
+        calls = []
+
+        async def fake_report(user_id):
+            return DATA, "report", None
+
+        async def fake_notion(user_id, data, answer, ai_error, today):
+            calls.append((user_id, answer, today))
+            return "📝 Notionにも保存しました：https://notion.so/x"
+
+        now = datetime(2026, 10, 18, 21, 0, tzinfo=config.JST)
+        with patch.object(weekly_feature, "create_weekly_report", fake_report), \
+                patch.object(weekly_feature, "save_weekly_report_to_notion", fake_notion):
+            await weekly_feature.send_weekly_reports(fake_bot, now)
+
+        self.assertEqual(calls, [(1, "report", SUNDAY)])
+        self.assertTrue(guild.channel.sent[0]["content"].endswith(
+            "\n📝 Notionにも保存しました：https://notion.so/x"
+        ))
 
 
 DATA = {
