@@ -5,7 +5,7 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlparse
 
-from study_log_parser import SG_PRACTICE_CATEGORIES
+from studybot.study_log_parser import SG_PRACTICE_CATEGORIES
 
 
 SG_B_TOPICS = (

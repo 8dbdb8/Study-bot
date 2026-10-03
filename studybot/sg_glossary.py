@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-GLOSSARY_PATH = Path(__file__).resolve().parent / "data" / "sg_glossary.json"
+GLOSSARY_PATH = Path(__file__).resolve().parents[1] / "data" / "sg_glossary.json"
 SOURCE_GLOSSARY_URL = "https://www.sg-siken.com/keyword/"
 SG_GLOSSARY_RATINGS = (
     "できた",

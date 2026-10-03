@@ -5,8 +5,8 @@ from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 
-from sg_glossary import GlossaryEntry
-from sg_glossary_history import (
+from studybot.sg_glossary import GlossaryEntry
+from studybot.sg_glossary_history import (
     get_glossary_session,
     init_glossary_history_db,
     record_glossary_card,

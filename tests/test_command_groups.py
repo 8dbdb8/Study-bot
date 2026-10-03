@@ -1,14 +1,21 @@
 import unittest
 from types import SimpleNamespace
 
-import bot
+from studybot import groups
+from studybot.features import ai as ai_feature
+from studybot.features import plan as plan_feature
+from studybot.features import review as review_feature
+from studybot.app import create_bot
+
+
+BOT = create_bot()
 
 
 EXPECTED = {
     "sg": {"log", "b", "progress", "status", "glossary"},
-    "review": {"add", "list", "answer"},
+    "review": {"add", "list", "start", "answer"},
     "time": {"today", "week", "logs"},
-    "plan": {"new", "status", "exam", "roadmap"},
+    "plan": {"new", "status", "exam", "notify", "roadmap"},
     "ai": {"today", "next", "report"},
 }
 
@@ -16,10 +23,10 @@ EXPECTED = {
 class CommandGroupTests(unittest.TestCase):
     def test_slash_commands_are_grouped(self):
         top_level = {
-            command.name: command for command in bot.bot.tree.get_commands()
+            command.name: command for command in BOT.tree.get_commands()
         }
         self.assertEqual(
-            set(top_level), set(EXPECTED) | {"data", "help"}
+            set(top_level), set(EXPECTED) | {"data", "setup", "help"}
         )
         for group, subcommands in EXPECTED.items():
             with self.subTest(group=group):
@@ -35,16 +42,16 @@ class CommandGroupTests(unittest.TestCase):
             "status", "today", "week", "logs", "next", "report",
         ):
             with self.subTest(name=name):
-                self.assertIsNone(bot.bot.get_command(name))
-                self.assertIsNone(bot.bot.tree.get_command(name))
+                self.assertIsNone(BOT.get_command(name))
+                self.assertIsNone(BOT.tree.get_command(name))
 
     def test_prefix_subcommands_resolve(self):
-        self.assertIs(bot.bot.get_command("plan new"), bot.plan)
-        self.assertIs(bot.bot.get_command("review answer"), bot.review)
-        self.assertIs(bot.bot.get_command("ai today"), bot.ai)
+        self.assertIs(BOT.get_command("plan new"), plan_feature.plan)
+        self.assertIs(BOT.get_command("review answer"), review_feature.review)
+        self.assertIs(BOT.get_command("ai today"), ai_feature.ai)
 
     def test_help_lists_every_subcommand_in_order(self):
-        text = bot.build_help_text()
+        text = groups.build_help_text(BOT)
         for group, subcommands in EXPECTED.items():
             for sub in subcommands:
                 self.assertIn(f"`/{group} {sub}`", text)
@@ -57,9 +64,10 @@ class CommandGroupTests(unittest.TestCase):
 class _Context:
     def __init__(self, command):
         self.command = command
+        self.bot = BOT
         self.messages = []
 
-    async def send(self, content, **kwargs):
+    async def send(self, content=None, **kwargs):
         self.messages.append((content, kwargs))
 
 
@@ -68,16 +76,17 @@ class HelpCommandTests(unittest.IsolatedAsyncioTestCase):
         ctx = _Context(None)
         ctx.author = SimpleNamespace(id=1)
 
-        await bot.help_command.callback(ctx)
+        await groups.help_command.callback(ctx)
 
-        content, kwargs = ctx.messages[0]
-        self.assertIn("StudyBot の使い方", content)
+        _, kwargs = ctx.messages[0]
+        self.assertEqual(kwargs["embed"].title, "StudyBot の使い方")
+        self.assertIn("`/review start`", kwargs["embed"].description)
         self.assertTrue(kwargs.get("ephemeral"))
 
     async def test_group_without_subcommand_shows_its_list(self):
-        ctx = _Context(bot.bot.get_command("review"))
+        ctx = _Context(BOT.get_command("review"))
 
-        await bot.review_group.callback(ctx)
+        await groups.review_group.callback(ctx)
 
         content, _ = ctx.messages[0]
         self.assertTrue(content.startswith("**/review**"))

@@ -7,8 +7,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import bot
-from exam_schedule import (
+from datetime import datetime
+from studybot import config
+from studybot import database as database_module
+from studybot.features import exam as exam_feature
+from studybot.features import plan as plan_feature
+from studybot.exam_schedule import (
     build_exam_date,
     delete_exam_date,
     format_exam_countdown,
@@ -87,10 +91,10 @@ class ExamDateDatabaseTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.db_path = str(Path(self.temp_dir.name) / "study.db")
-        db_patch = patch.object(bot, "DB_PATH", self.db_path)
+        db_patch = patch.object(config, "DB_PATH", self.db_path)
         db_patch.start()
         self.addCleanup(db_patch.stop)
-        bot.init_db()
+        database_module.init_db()
 
     def test_save_overwrite_and_delete_per_user(self):
         save_exam_date(self.db_path, 1, "SG", date(2026, 11, 25), "t1")
@@ -111,7 +115,7 @@ class ExamDateDatabaseTests(unittest.TestCase):
 
     def test_current_exam_target_uses_current_qualification(self):
         save_exam_date(self.db_path, 1, "SG", date(2026, 11, 25), "t")
-        target = bot.get_current_exam_target(1)
+        target = plan_feature.get_current_exam_target(1)
         self.assertEqual(target["qualification"], "SG")
         self.assertEqual(target["label"], "SG試験")
         self.assertEqual(target["exam_on"], date(2026, 11, 25))
@@ -174,12 +178,12 @@ class ExamDateViewTests(unittest.IsolatedAsyncioTestCase):
             "label": "SG試験",
             "exam_on": exam_on,
         }
-        return bot.ExamDateView(123, target, today)
+        return exam_feature.ExamDateView(123, target, today)
 
     def selects(self, view):
         return [
             child for child in view.children
-            if isinstance(child, bot.ExamDatePartSelect)
+            if isinstance(child, exam_feature.ExamDatePartSelect)
         ]
 
     def save_button(self, view):
@@ -293,13 +297,13 @@ class PlanFromExamDateTests(unittest.IsolatedAsyncioTestCase):
             "update_sg_plan_text": lambda *args: None,
             "ask_ollama": fake_ask,
         }.items():
-            patcher = patch.object(bot, name, value)
+            patcher = patch.object(plan_feature, name, value)
             patcher.start()
             self.addCleanup(patcher.stop)
 
     def set_exam(self, exam_on):
         patcher = patch.object(
-            bot, "get_current_exam_target",
+            plan_feature, "get_current_exam_target",
             lambda user_id: {
                 "qualification": "SG", "display_name": "SG",
                 "label": "SG試験", "exam_on": exam_on,
@@ -309,12 +313,12 @@ class PlanFromExamDateTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(patcher.stop)
 
     async def test_weeks_omitted_uses_exam_date(self):
-        today = bot.datetime.now(bot.JST).date()
+        today = datetime.now(config.JST).date()
         exam_on = date.fromordinal(today.toordinal() + 40)
         self.set_exam(exam_on)
         ctx = _Context()
 
-        await bot.plan.callback(ctx)
+        await plan_feature.plan.callback(ctx)
 
         self.assertEqual(self.saved, (6, 30))
         self.assertIn("【試験日】", self.prompt)
@@ -327,17 +331,17 @@ class PlanFromExamDateTests(unittest.IsolatedAsyncioTestCase):
         self.set_exam(None)
         ctx = _Context()
 
-        await bot.plan.callback(ctx)
+        await plan_feature.plan.callback(ctx)
 
         self.assertIsNone(self.saved)
         self.assertIn("/plan exam", ctx.messages[0])
 
     async def test_far_exam_is_capped_to_16_weeks(self):
-        today = bot.datetime.now(bot.JST).date()
+        today = datetime.now(config.JST).date()
         self.set_exam(date.fromordinal(today.toordinal() + 200))
         ctx = _Context()
 
-        await bot.plan.callback(ctx)
+        await plan_feature.plan.callback(ctx)
 
         self.assertEqual(self.saved, (16, 30))
         self.assertIn("直近16週分", ctx.messages[0])

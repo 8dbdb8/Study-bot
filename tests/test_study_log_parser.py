@@ -1,6 +1,6 @@
 import unittest
 
-from study_log_parser import (
+from studybot.study_log_parser import (
     infer_correct_answers,
     normalize_study_analysis,
     parse_question_count_input,

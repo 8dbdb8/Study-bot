@@ -5,7 +5,7 @@ import unittest
 from contextlib import closing
 from pathlib import Path
 
-from sg_glossary import (
+from studybot.sg_glossary import (
     GLOSSARY_PATH,
     GlossaryDataError,
     GlossaryEntry,

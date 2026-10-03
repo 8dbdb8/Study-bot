@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 
-from sg_glossary import (
+from studybot.sg_glossary import (
     SG_GLOSSARY_RATINGS,
     GlossaryEntry,
     glossary_entry_key,
@@ -15,7 +15,7 @@ from sg_glossary import (
 
 
 GLOSSARY_HISTORY_PATH = (
-    Path(__file__).resolve().parent / "data" / "sg_glossary_history.db"
+    Path(__file__).resolve().parents[1] / "data" / "sg_glossary_history.db"
 )
 
 

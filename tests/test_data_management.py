@@ -7,8 +7,14 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import bot
-from data_management import (
+from studybot import analysis as analysis_module
+from studybot import config
+from studybot import database as database_module
+from studybot import sg_features
+from studybot import stats as stats_module
+from studybot.features import data as data_feature
+from studybot.app import create_bot
+from studybot.data_management import (
     apply_edit,
     get_overview,
     get_record,
@@ -17,10 +23,13 @@ from data_management import (
     prepare_reset,
     reset_user_data,
 )
-from sg_glossary import (
+from studybot.sg_glossary import (
     GlossaryEntry, get_sg_glossary_ratings, save_sg_glossary_rating,
 )
-from sg_features import add_sg_mistake, save_sg_b_practice, save_sg_plan
+from studybot.sg_features import add_sg_mistake, save_sg_b_practice, save_sg_plan
+
+
+BOT = create_bot()
 
 
 class DataManagementTests(unittest.TestCase):
@@ -28,10 +37,10 @@ class DataManagementTests(unittest.TestCase):
         directory = tempfile.TemporaryDirectory()
         self.addCleanup(directory.cleanup)
         self.db_path = str(Path(directory.name) / "study.db")
-        db_patch = patch.object(bot, "DB_PATH", self.db_path)
+        db_patch = patch.object(config, "DB_PATH", self.db_path)
         db_patch.start()
         self.addCleanup(db_patch.stop)
-        bot.init_db()
+        database_module.init_db()
 
     def save_log(self, user_id, message_id, analysis):
         message = SimpleNamespace(
@@ -39,11 +48,11 @@ class DataManagementTests(unittest.TestCase):
             guild=SimpleNamespace(id=1),
             channel=SimpleNamespace(id=2),
             author=SimpleNamespace(id=user_id, display_name="student"),
-            created_at=datetime(2026, 9, 29, 20, 0, tzinfo=bot.JST),
+            created_at=datetime(2026, 9, 29, 20, 0, tzinfo=config.JST),
             content="test log",
         )
-        bot.save_study_log(message)
-        bot.save_study_analysis(message, analysis)
+        database_module.save_study_log(message)
+        database_module.save_study_analysis(message, analysis)
 
     def edit(self, user_id, kind, record_id, field, raw_value):
         preview = prepare_edit(
@@ -57,22 +66,22 @@ class DataManagementTests(unittest.TestCase):
     def test_sg_log_correction_recalculates_totals_and_category(self):
         self.save_log(
             123, 101,
-            bot.build_structured_sg_analysis("情報セキュリティ", 25, 40.0),
+            analysis_module.build_structured_sg_analysis("情報セキュリティ", 25, 40.0),
         )
         preview = prepare_edit(
             self.db_path, 123, "log", 101, "score_percent", "60.25",
         )
         self.assertEqual(preview["value"], 60.3)
-        self.assertEqual(bot.get_study_status(123)["average_score"], 40.0)
+        self.assertEqual(stats_module.get_study_status(123)["average_score"], 40.0)
         apply_edit(
             self.db_path, 123, "log", 101, "score_percent",
             preview["value"], preview["record"],
         )
-        self.assertEqual(bot.get_study_status(123)["average_score"], 60.3)
+        self.assertEqual(stats_module.get_study_status(123)["average_score"], 60.3)
         self.edit(123, "log", 101, "questions", "10")
         self.edit(123, "log", 101, "category", "ネットワーク")
-        self.assertEqual(bot.get_study_status(123)["total_questions"], 10)
-        progress, _ = bot.get_sg_category_progress(self.db_path, 123)
+        self.assertEqual(stats_module.get_study_status(123)["total_questions"], 10)
+        progress, _ = sg_features.get_sg_category_progress(self.db_path, 123)
         self.assertEqual(
             next(item for item in progress if item["category"] == "ネットワーク")
             ["questions"], 10,
@@ -81,7 +90,7 @@ class DataManagementTests(unittest.TestCase):
                          ["categories"][0]["major_category"], "テクノロジ系")
 
     def test_legacy_ambiguous_log_requires_category_first(self):
-        analysis = bot.build_structured_sg_analysis("情報セキュリティ", 16, 50.0)
+        analysis = analysis_module.build_structured_sg_analysis("情報セキュリティ", 16, 50.0)
         analysis["exam_section"] = None
         analysis["category_results"] = [
             {"major_category": "テクノロジ系", "category": None,
@@ -104,7 +113,7 @@ class DataManagementTests(unittest.TestCase):
     def test_b_edit_updates_both_tables_and_owner_isolation(self):
         self.save_log(
             123, 103,
-            bot.build_structured_sg_b_analysis(
+            analysis_module.build_structured_sg_b_analysis(
                 "情報資産管理", 5, 3, "読み違い", "復習する",
             ),
         )
@@ -126,7 +135,7 @@ class DataManagementTests(unittest.TestCase):
     def test_b_correction_requires_reason_when_it_creates_a_mistake(self):
         self.save_log(
             123, 108,
-            bot.build_structured_sg_b_analysis("情報資産管理", 5, 5),
+            analysis_module.build_structured_sg_b_analysis("情報資産管理", 5, 5),
         )
         save_sg_b_practice(
             self.db_path, 108, 123, "情報資産管理", 5, 5,
@@ -140,8 +149,8 @@ class DataManagementTests(unittest.TestCase):
                          ["b"]["correct_answers"], 4)
 
     def test_session_mistake_and_plan_edits(self):
-        start = datetime(2026, 9, 29, 18, 0, tzinfo=bot.JST)
-        bot.save_completed_study_session(
+        start = datetime(2026, 9, 29, 18, 0, tzinfo=config.JST)
+        database_module.save_completed_study_session(
             1, 123, "student", start, start + timedelta(minutes=30), 1800,
         )
         session_id = list_records(self.db_path, 123, "session")[0][0]["id"]
@@ -172,28 +181,28 @@ class DataManagementTests(unittest.TestCase):
     def test_reset_is_scoped_and_confirmation_snapshot_is_required(self):
         self.save_log(
             123, 104,
-            bot.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
+            analysis_module.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
         )
         self.save_log(
             999, 105,
-            bot.build_structured_sg_analysis("ネットワーク", 8, 75.0),
+            analysis_module.build_structured_sg_analysis("ネットワーク", 8, 75.0),
         )
         ids = prepare_reset(self.db_path, 123, "sg_logs")
-        self.assertEqual(bot.get_study_status(123)["log_count"], 1)
+        self.assertEqual(stats_module.get_study_status(123)["log_count"], 1)
         self.save_log(
             123, 106,
-            bot.build_structured_sg_analysis("企業活動", 5, 60.0),
+            analysis_module.build_structured_sg_analysis("企業活動", 5, 60.0),
         )
         with self.assertRaisesRegex(ValueError, "記録が変わりました"):
             reset_user_data(self.db_path, 123, "sg_logs", ids)
-        self.assertEqual(bot.get_study_status(123)["log_count"], 2)
+        self.assertEqual(stats_module.get_study_status(123)["log_count"], 2)
         count = reset_user_data(
             self.db_path, 123, "sg_logs",
             prepare_reset(self.db_path, 123, "sg_logs"),
         )
         self.assertEqual(count, 2)
-        self.assertEqual(bot.get_study_status(123)["log_count"], 0)
-        self.assertEqual(bot.get_study_status(999)["log_count"], 1)
+        self.assertEqual(stats_module.get_study_status(123)["log_count"], 0)
+        self.assertEqual(stats_module.get_study_status(999)["log_count"], 1)
         self.assertEqual(get_overview(self.db_path, 123)["logs"]["total"], 0)
         with closing(sqlite3.connect(self.db_path)) as conn:
             self.assertEqual(conn.execute(
@@ -221,7 +230,7 @@ class DataManagementTests(unittest.TestCase):
             "total": 1, "done": 1, "failed": 0,
             "needs_review": 0, "unsure": 0,
         })
-        self.assertIn("SG単語帳の自己評価：1語", bot._data_home_text(123))
+        self.assertIn("SG単語帳の自己評価：1語", data_feature._data_home_text(123))
 
         stale_ids = prepare_reset(self.db_path, 123, "glossary_ratings")
         save_sg_glossary_rating(self.db_path, 123, first, "微妙")
@@ -254,7 +263,7 @@ class DataManagementTests(unittest.TestCase):
         for user_id, message_id in ((123, 109), (999, 110)):
             self.save_log(
                 user_id, message_id,
-                bot.build_structured_sg_b_analysis(
+                analysis_module.build_structured_sg_b_analysis(
                     "情報資産管理", 5, 3, "読み違い",
                 ),
             )
@@ -262,8 +271,8 @@ class DataManagementTests(unittest.TestCase):
                 self.db_path, message_id, user_id, "情報資産管理",
                 5, 3, "読み違い", None, "2026-09-29",
             )
-            start = datetime(2026, 9, 29, 18, 0, tzinfo=bot.JST)
-            bot.save_completed_study_session(
+            start = datetime(2026, 9, 29, 18, 0, tzinfo=config.JST)
+            database_module.save_completed_study_session(
                 1, user_id, "student", start,
                 start + timedelta(minutes=30), 1800,
             )
@@ -298,7 +307,7 @@ class DataManagementTests(unittest.TestCase):
     def test_edit_rejects_stale_confirmation(self):
         self.save_log(
             123, 107,
-            bot.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
+            analysis_module.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
         )
         preview = prepare_edit(
             self.db_path, 123, "log", 107, "score_percent", "50",
@@ -309,27 +318,27 @@ class DataManagementTests(unittest.TestCase):
                 self.db_path, 123, "log", 107, "score_percent",
                 preview["value"], preview["record"],
             )
-        self.assertEqual(bot.get_study_status(123)["average_score"], 60.0)
+        self.assertEqual(stats_module.get_study_status(123)["average_score"], 60.0)
 
     def test_data_command_and_initial_view_are_available(self):
-        self.assertIsNotNone(bot.bot.tree.get_command("data"))
-        view = bot.DataHomeView(123)
+        self.assertIsNotNone(BOT.tree.get_command("data"))
+        view = data_feature.DataHomeView(123)
         self.assertEqual(
             {item.label for item in view.children},
             {"修正", "リセット", "そのまま"},
         )
-        self.assertIn("保存データ一覧", bot._data_home_text(123))
+        self.assertIn("保存データ一覧", data_feature._data_home_text(123))
         self.save_log(
             123, 111,
-            bot.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
+            analysis_module.build_structured_sg_analysis("情報セキュリティ", 10, 40.0),
         )
-        self.assertTrue(bot.DataKindView(123).children)
-        self.assertTrue(bot.DataRecordListView(123, "log").children)
-        self.assertTrue(bot.DataFieldView(123, "log", 111).children)
-        self.assertTrue(bot.DataChoiceValueView(
+        self.assertTrue(data_feature.DataKindView(123).children)
+        self.assertTrue(data_feature.DataRecordListView(123, "log").children)
+        self.assertTrue(data_feature.DataFieldView(123, "log", 111).children)
+        self.assertTrue(data_feature.DataChoiceValueView(
             123, "log", 111, "category", ("情報セキュリティ",),
         ).children)
-        self.assertTrue(bot.DataResetScopeView(123).children)
+        self.assertTrue(data_feature.DataResetScopeView(123).children)
 
 
 if __name__ == "__main__":

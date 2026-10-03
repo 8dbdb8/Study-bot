@@ -5,12 +5,18 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-import bot as bot_module
-from sg_glossary import (
+import discord
+from studybot import config
+from studybot.features import glossary as glossary_feature
+from studybot.app import create_bot
+from studybot.sg_glossary import (
     GLOSSARY_PATH, GlossaryEntry, get_sg_glossary_ratings,
     glossary_entry_key, load_glossary,
 )
-from sg_glossary_history import get_glossary_session
+from studybot.sg_glossary_history import get_glossary_session
+
+
+BOT = create_bot()
 
 
 RATING_VALUES = ("できた", "できなかった", "まだ要復習", "微妙")
@@ -32,20 +38,20 @@ class _Context:
 class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         reader = patch.object(
-            bot_module, "get_sg_glossary_ratings", return_value={},
+            glossary_feature, "get_sg_glossary_ratings", return_value={},
         )
         reader.start()
         self.addCleanup(reader.stop)
 
     async def test_command_selects_category_and_card_mode(self):
-        self.assertIsNotNone(bot_module.bot.get_command("sg glossary"))
+        self.assertIsNotNone(BOT.get_command("sg glossary"))
         entries = [
             GlossaryEntry("用語A", "意味A", "セキュリティ"),
             GlossaryEntry("用語B", "", "法務", "https://example.com/b"),
         ]
         ctx = _Context(channel_name="sg用語集")
-        with patch.object(bot_module, "load_glossary", return_value=entries):
-            await bot_module.sgglossary.callback(
+        with patch.object(glossary_feature, "load_glossary", return_value=entries):
+            await glossary_feature.sgglossary.callback(
                 ctx, mode="cards", category="法務"
             )
         content, kwargs = ctx.messages[0]
@@ -59,7 +65,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(view.entries), 1)
         self.assertIs(view.record_channel, ctx.channel)
         self.assertEqual(view.guild_id, ctx.guild.id)
-        self.assertEqual(view.history_db_path, bot_module.GLOSSARY_HISTORY_PATH)
+        self.assertEqual(view.history_db_path, glossary_feature.GLOSSARY_HISTORY_PATH)
         view.revealed = True
         self.assertIn("意味は未登録です", view.content())
         self.assertIn("https://example.com/b", view.content())
@@ -70,8 +76,8 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             GlossaryEntry("用語B", "意味B", "法務"),
         ]
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", return_value=entries):
-            await bot_module.sgglossary.callback(ctx)
+        with patch.object(glossary_feature, "load_glossary", return_value=entries):
+            await glossary_feature.sgglossary.callback(ctx)
         self.assertIn("全分野 / 2件", ctx.messages[0][0])
         self.assertEqual(len(ctx.messages[0][1]["view"].entries), 2)
 
@@ -80,20 +86,20 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         ratings = {glossary_entry_key(entry): "微妙"}
         ctx = _Context()
         with (
-            patch.object(bot_module, "load_glossary", return_value=[entry]),
+            patch.object(glossary_feature, "load_glossary", return_value=[entry]),
             patch.object(
-                bot_module, "get_sg_glossary_ratings", return_value=ratings,
+                glossary_feature, "get_sg_glossary_ratings", return_value=ratings,
             ) as reader,
         ):
-            await bot_module.sgglossary.callback(ctx, mode="cards")
-        reader.assert_called_once_with(bot_module.DB_PATH, 123, [entry])
+            await glossary_feature.sgglossary.callback(ctx, mode="cards")
+        reader.assert_called_once_with(config.DB_PATH, 123, [entry])
         view = ctx.messages[0][1]["view"]
         view.revealed = True
         self.assertIn("自己評価: 微妙", view.content())
 
     async def test_legacy_review_rating_uses_short_visible_label(self):
         entry = GlossaryEntry("用語A", "意味A", "セキュリティ")
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [entry], mode="cards",
             ratings={glossary_entry_key(entry): "まだ要復習"},
         )
@@ -119,7 +125,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             glossary_entry_key(entry): rating
             for entry, rating in zip(entries, RATING_VALUES)
         }
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, entries, mode="cards", ratings=ratings,
         )
         select = view.rating_filter_select
@@ -156,7 +162,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rating_filter_with_no_match_keeps_current_cards(self):
         entry = GlossaryEntry("未評価語", "意味")
-        view = bot_module.SGGlossaryView(123, [entry], mode="cards")
+        view = glossary_feature.SGGlossaryView(123, [entry], mode="cards")
         interaction = SimpleNamespace(
             response=SimpleNamespace(
                 edit_message=AsyncMock(), send_message=AsyncMock(),
@@ -172,7 +178,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_filtered_deck_is_fixed_until_ratings_are_selected_again(self):
         first = GlossaryEntry("最初", "意味")
         second = GlossaryEntry("次", "意味")
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [first, second], mode="cards",
             ratings={
                 glossary_entry_key(first): "まだ要復習",
@@ -186,9 +192,9 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         await view._apply_rating_filter(interaction, ("まだ要復習",))
         await view.reveal.callback(interaction)
-        with patch.object(bot_module, "save_sg_glossary_rating") as save:
+        with patch.object(glossary_feature, "save_sg_glossary_rating") as save:
             await view.rated_yes.callback(interaction)
-        save.assert_called_once_with(bot_module.DB_PATH, 123, first, "できた")
+        save.assert_called_once_with(config.DB_PATH, 123, first, "できた")
         self.assertEqual(view.entries, (first, second))
         self.assertEqual(view.card_index, 1)
         self.assertIn("評価（選択時）: 要復習", view.content())
@@ -204,8 +210,8 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             GlossaryEntry("認証", "本人確認", "セキュリティ"),
         ]
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", return_value=entries):
-            await bot_module.sgglossary.callback(
+        with patch.object(glossary_feature, "load_glossary", return_value=entries):
+            await glossary_feature.sgglossary.callback(
                 ctx, category="セキュリティ", query="秘密",
             )
         content, kwargs = ctx.messages[0]
@@ -216,56 +222,56 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(kwargs["view"].entries), 1)
 
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", return_value=entries):
-            await bot_module.sgglossary.callback(ctx, query="本人確認")
+        with patch.object(glossary_feature, "load_glossary", return_value=entries):
+            await glossary_feature.sgglossary.callback(ctx, query="本人確認")
         self.assertIn("認証", ctx.messages[0][0])
         self.assertEqual(len(ctx.messages[0][1]["view"].entries), 1)
 
     async def test_unmatched_or_too_long_search_has_guidance(self):
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary") as reader:
-            await bot_module.sgglossary.callback(ctx, query="長" * 101)
+        with patch.object(glossary_feature, "load_glossary") as reader:
+            await glossary_feature.sgglossary.callback(ctx, query="長" * 101)
         reader.assert_not_called()
         self.assertIn("100文字以内", ctx.messages[0][0])
 
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", return_value=[
+        with patch.object(glossary_feature, "load_glossary", return_value=[
             GlossaryEntry("認証", "本人確認", "セキュリティ"),
         ]):
-            await bot_module.sgglossary.callback(ctx, query="暗号")
+            await glossary_feature.sgglossary.callback(ctx, query="暗号")
         self.assertIn("一致する用語がありません", ctx.messages[0][0])
 
     async def test_invalid_or_empty_category_has_guidance(self):
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary") as reader:
-            await bot_module.sgglossary.callback(ctx, category="存在しない分野")
+        with patch.object(glossary_feature, "load_glossary") as reader:
+            await glossary_feature.sgglossary.callback(ctx, category="存在しない分野")
         reader.assert_not_called()
         self.assertIn("候補から", ctx.messages[0][0])
 
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", return_value=[
+        with patch.object(glossary_feature, "load_glossary", return_value=[
             GlossaryEntry("用語A", "意味A", "セキュリティ"),
         ]):
-            await bot_module.sgglossary.callback(ctx, category="法務")
+            await glossary_feature.sgglossary.callback(ctx, category="法務")
         self.assertIn("選んだ分野の用語がありません", ctx.messages[0][0])
 
     async def test_wrong_channel_does_not_read_data(self):
         ctx = _Context(channel_name="雑談")
-        with patch.object(bot_module, "load_glossary") as reader:
-            await bot_module.sgglossary.callback(ctx)
+        with patch.object(glossary_feature, "load_glossary") as reader:
+            await glossary_feature.sgglossary.callback(ctx)
         reader.assert_not_called()
         self.assertIn("#SG用語集", ctx.messages[0][0])
 
     async def test_missing_data_gives_file_and_source_guidance(self):
         ctx = _Context()
-        with patch.object(bot_module, "load_glossary", side_effect=FileNotFoundError):
-            await bot_module.sgglossary.callback(ctx)
+        with patch.object(glossary_feature, "load_glossary", side_effect=FileNotFoundError):
+            await glossary_feature.sgglossary.callback(ctx)
         self.assertIn("data/sg_glossary.json", ctx.messages[0][0])
         self.assertIn("https://www.sg-siken.com/keyword/", ctx.messages[0][0])
 
     async def test_list_pages_keep_long_meaning_and_stay_bounded(self):
         meaning = "長い意味" * 500
-        pages = bot_module._sg_glossary_list_pages([
+        pages = glossary_feature._sg_glossary_list_pages([
             GlossaryEntry("長い用語", meaning),
         ])
         self.assertGreater(len(pages), 1)
@@ -273,7 +279,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("長い意味", pages[-1][0])
 
     async def test_one_hand_buttons_reveal_advance_and_switch_modes(self):
-        view = bot_module.SGGlossaryView(123, [
+        view = glossary_feature.SGGlossaryView(123, [
             GlossaryEntry("最初", "一つ目の意味"),
             GlossaryEntry("次", "二つ目の意味"),
         ], mode="cards")
@@ -294,7 +300,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interaction.response.edit_message.await_count, 3)
 
     async def test_self_rating_buttons_appear_only_for_revealed_cards(self):
-        view = bot_module.SGGlossaryView(123, [
+        view = glossary_feature.SGGlossaryView(123, [
             GlossaryEntry("最初", "一つ目の意味"),
             GlossaryEntry("次", "二つ目の意味"),
         ])
@@ -325,7 +331,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         second = GlossaryEntry("次", "二つ目の意味")
         for label, rating in zip(RATING_LABELS, RATING_VALUES):
             with self.subTest(rating=label):
-                view = bot_module.SGGlossaryView(
+                view = glossary_feature.SGGlossaryView(
                     123, [first, second], mode="cards",
                 )
                 interaction = SimpleNamespace(
@@ -337,10 +343,10 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
                     child for child in view.children
                     if getattr(child, "label", None) == label
                 )
-                with patch.object(bot_module, "save_sg_glossary_rating") as save:
+                with patch.object(glossary_feature, "save_sg_glossary_rating") as save:
                     await button.callback(interaction)
                 save.assert_called_once_with(
-                    bot_module.DB_PATH, 123, first, rating,
+                    config.DB_PATH, 123, first, rating,
                 )
                 self.assertEqual(view.card_index, 1)
                 self.assertFalse(view.revealed)
@@ -348,7 +354,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_rating_last_card_stays_on_last_card(self):
         entry = GlossaryEntry("最後", "最後の意味")
-        view = bot_module.SGGlossaryView(123, [entry], mode="cards")
+        view = glossary_feature.SGGlossaryView(123, [entry], mode="cards")
         interaction = SimpleNamespace(
             user=SimpleNamespace(id=123),
             response=SimpleNamespace(edit_message=AsyncMock()),
@@ -358,14 +364,14 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             child for child in view.children
             if getattr(child, "label", None) == "できた"
         )
-        with patch.object(bot_module, "save_sg_glossary_rating") as save:
+        with patch.object(glossary_feature, "save_sg_glossary_rating") as save:
             await button.callback(interaction)
-        save.assert_called_once_with(bot_module.DB_PATH, 123, entry, "できた")
+        save.assert_called_once_with(config.DB_PATH, 123, entry, "できた")
         self.assertEqual(view.card_index, 0)
 
     async def test_failed_rating_keeps_current_card(self):
         entry = GlossaryEntry("最初", "一つ目の意味")
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [entry, GlossaryEntry("次", "二つ目の意味")], mode="cards",
         )
         interaction = SimpleNamespace(
@@ -376,7 +382,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         )
         await view.reveal.callback(interaction)
         with patch.object(
-            bot_module, "save_sg_glossary_rating",
+            glossary_feature, "save_sg_glossary_rating",
             side_effect=sqlite3.OperationalError("database is locked"),
         ):
             await view.rated_yes.callback(interaction)
@@ -387,7 +393,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_navigation_without_rating_does_not_post_study_record(self):
         channel = SimpleNamespace(id=7, send=AsyncMock())
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [GlossaryEntry("最初", "一つ目の意味")],
             record_channel=channel, guild_id=1,
         )
@@ -395,7 +401,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             user=SimpleNamespace(id=123),
             response=SimpleNamespace(edit_message=AsyncMock()),
         )
-        with patch.object(bot_module, "record_glossary_card") as record:
+        with patch.object(glossary_feature, "record_glossary_card") as record:
             await view.switch_mode.callback(interaction)
             await view.reveal.callback(interaction)
             await view.reveal.callback(interaction)
@@ -411,7 +417,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             id=7, send=AsyncMock(return_value=public_message),
             fetch_message=AsyncMock(return_value=public_message),
         )
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [first, second], mode="cards", record_channel=channel,
             guild_id=1, history_db_path="test-glossary-history.db",
         )
@@ -443,12 +449,12 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             },
         ]
         with (
-            patch.object(bot_module, "save_sg_glossary_rating") as save_latest,
+            patch.object(glossary_feature, "save_sg_glossary_rating") as save_latest,
             patch.object(
-                bot_module, "record_glossary_card", side_effect=summaries,
+                glossary_feature, "record_glossary_card", side_effect=summaries,
             ) as record,
             patch.object(
-                bot_module, "set_glossary_summary_message_id",
+                glossary_feature, "set_glossary_summary_message_id",
             ) as save_message_id,
         ):
             await view.reveal.callback(interaction)
@@ -487,11 +493,11 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         response = SimpleNamespace(status=403, reason="Forbidden")
         channel = SimpleNamespace(
             id=7,
-            send=AsyncMock(side_effect=bot_module.discord.Forbidden(
+            send=AsyncMock(side_effect=discord.Forbidden(
                 response, "cannot send",
             )),
         )
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [entry], mode="cards", record_channel=channel,
             guild_id=1, history_db_path="test-glossary-history.db",
         )
@@ -507,11 +513,11 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             "summary_message_id": None,
         }
         with (
-            patch.object(bot_module, "save_sg_glossary_rating"),
+            patch.object(glossary_feature, "save_sg_glossary_rating"),
             patch.object(
-                bot_module, "record_glossary_card", return_value=summary,
+                glossary_feature, "record_glossary_card", return_value=summary,
             ) as record,
-            patch.object(bot_module, "set_glossary_summary_message_id") as save_id,
+            patch.object(glossary_feature, "set_glossary_summary_message_id") as save_id,
         ):
             await view.reveal.callback(interaction)
             await view.rated_unsure.callback(interaction)
@@ -531,7 +537,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         channel = SimpleNamespace(
             id=7, send=AsyncMock(return_value=public_message),
         )
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, [first, second], mode="cards", record_channel=channel,
             guild_id=1, history_db_path="test-glossary-history.db",
         )
@@ -553,12 +559,12 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
             "summary_message_id": None,
         }
         with (
-            patch.object(bot_module, "save_sg_glossary_rating") as save_latest,
+            patch.object(glossary_feature, "save_sg_glossary_rating") as save_latest,
             patch.object(
-                bot_module, "record_glossary_card",
+                glossary_feature, "record_glossary_card",
                 side_effect=[sqlite3.OperationalError("database is locked"), summary],
             ) as record,
-            patch.object(bot_module, "set_glossary_summary_message_id"),
+            patch.object(glossary_feature, "set_glossary_summary_message_id"),
         ):
             await view.reveal.callback(failed_interaction)
             await view.rated_yes.callback(failed_interaction)
@@ -597,11 +603,11 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             primary_path = Path(directory) / "study.db"
             history_path = Path(directory) / "sg_glossary_history.db"
-            view = bot_module.SGGlossaryView(
+            view = glossary_feature.SGGlossaryView(
                 123, [entry], mode="cards", record_channel=channel,
                 guild_id=1, history_db_path=history_path,
             )
-            with patch.object(bot_module, "DB_PATH", primary_path):
+            with patch.object(config, "DB_PATH", primary_path):
                 await view.reveal.callback(interaction)
                 await view.rated_review.callback(interaction)
 
@@ -620,7 +626,7 @@ class GlossaryCommandTests(unittest.IsolatedAsyncioTestCase):
         interaction.followup.send.assert_not_awaited()
 
     async def test_bundled_glossary_messages_fit_discord_limit(self):
-        view = bot_module.SGGlossaryView(
+        view = glossary_feature.SGGlossaryView(
             123, load_glossary(GLOSSARY_PATH),
             category="プロジェクトマネジメント", query="*" * 100,
         )

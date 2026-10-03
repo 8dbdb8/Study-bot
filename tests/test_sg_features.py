@@ -7,8 +7,10 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-import bot
-from sg_features import (
+from studybot import analysis as analysis_module
+from studybot import config
+from studybot import database as database_module
+from studybot.sg_features import (
     add_sg_mistake,
     get_sg_b_summary,
     get_sg_category_progress,
@@ -27,16 +29,16 @@ class SGFeatureDatabaseTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
         self.db_path = str(Path(self.temp_dir.name) / "study.db")
-        self.db_patch = patch.object(bot, "DB_PATH", self.db_path)
+        self.db_patch = patch.object(config, "DB_PATH", self.db_path)
         self.db_patch.start()
         self.addCleanup(self.db_patch.stop)
-        bot.init_db()
+        database_module.init_db()
         self.next_message_id = 100
 
     def save_log(self, content, analysis, study_date):
         self.next_message_id += 1
         created_at = datetime.combine(
-            study_date, datetime.min.time(), bot.JST
+            study_date, datetime.min.time(), config.JST
         )
         message = SimpleNamespace(
             id=self.next_message_id,
@@ -46,8 +48,8 @@ class SGFeatureDatabaseTests(unittest.TestCase):
             created_at=created_at,
             content=content,
         )
-        bot.save_study_log(message)
-        bot.save_study_analysis(message, analysis)
+        database_module.save_study_log(message)
+        database_module.save_study_analysis(message, analysis)
         return message
 
     def test_mistake_review_schedule_and_user_isolation(self):
@@ -107,12 +109,12 @@ class SGFeatureDatabaseTests(unittest.TestCase):
         first_day = date(2026, 9, 28)
         second_day = date(2026, 9, 29)
         self.save_log(
-            "A 10問", bot.build_structured_sg_analysis(
+            "A 10問", analysis_module.build_structured_sg_analysis(
                 "情報セキュリティ", 10, 40.0
             ), first_day,
         )
         self.save_log(
-            "A 5問", bot.build_structured_sg_analysis(
+            "A 5問", analysis_module.build_structured_sg_analysis(
                 "情報セキュリティ", 5, 60.0
             ), second_day,
         )
@@ -128,7 +130,7 @@ class SGFeatureDatabaseTests(unittest.TestCase):
                 }],
             }, first_day,
         )
-        b_analysis = bot.build_structured_sg_b_analysis(
+        b_analysis = analysis_module.build_structured_sg_b_analysis(
             "リスクアセスメント", 3, 2,
             "残余リスクを見落とした", "表を見直す",
         )
@@ -165,7 +167,7 @@ class SGFeatureDatabaseTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(section, "B")
 
-        bot.delete_study_log_data(b_message.id)
+        database_module.delete_study_log_data(b_message.id)
         self.assertEqual(
             get_sg_b_summary(self.db_path, 123)["questions"], 0
         )
@@ -177,7 +179,7 @@ class SGFeatureDatabaseTests(unittest.TestCase):
             "2026-09-28T00:00:00+09:00", today=start,
         )
         self.save_log(
-            "A 18問", bot.build_structured_sg_analysis(
+            "A 18問", analysis_module.build_structured_sg_analysis(
                 "情報セキュリティ", 18, 50.0
             ), start + timedelta(days=1),
         )
@@ -188,7 +190,7 @@ class SGFeatureDatabaseTests(unittest.TestCase):
         self.assertEqual(second_week["rows"][1]["target"], 42)
 
         self.save_log(
-            "B 10問", bot.build_structured_sg_b_analysis(
+            "B 10問", analysis_module.build_structured_sg_b_analysis(
                 "委託先管理", 10, 7, "契約条件を誤読"
             ), start + timedelta(days=8),
         )
@@ -242,8 +244,8 @@ class SGFeatureDatabaseTests(unittest.TestCase):
             """)
             conn.commit()
 
-        with patch.object(bot, "DB_PATH", old_db_path):
-            bot.init_db()
+        with patch.object(config, "DB_PATH", old_db_path):
+            database_module.init_db()
 
         with closing(sqlite3.connect(old_db_path)) as conn:
             columns = {

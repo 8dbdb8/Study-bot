@@ -5,11 +5,11 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
-from sg_glossary import init_sg_glossary_rating_table
-from sg_features import (
+from studybot.sg_glossary import init_sg_glossary_rating_table
+from studybot.sg_features import (
     SG_B_TOPICS, parse_correct_count, score_from_counts, validate_question_ref,
 )
-from study_log_parser import (
+from studybot.study_log_parser import (
     SG_CATEGORY_TO_MAJOR,
     SG_PRACTICE_CATEGORIES,
     infer_correct_answers,

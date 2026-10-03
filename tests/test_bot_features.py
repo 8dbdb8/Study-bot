@@ -1,7 +1,15 @@
 import unittest
 from types import SimpleNamespace
 
-import bot as bot_module
+from studybot import analysis as analysis_module
+from studybot import forms
+from studybot import sg_features
+from studybot import study_log_parser
+from studybot.features import plan as plan_feature
+from studybot.app import create_bot
+
+
+BOT = create_bot()
 
 
 class _TypingContext:
@@ -27,7 +35,7 @@ class _Context:
 class StructuredSGLogTests(unittest.TestCase):
     def test_sglog_command_is_registered(self):
         self.assertIsNotNone(
-            bot_module.bot.get_command("sg log")
+            BOT.get_command("sg log")
         )
 
     def test_sg_study_commands_are_registered(self):
@@ -37,38 +45,38 @@ class StructuredSGLogTests(unittest.TestCase):
         ):
             with self.subTest(name=name):
                 self.assertIsNotNone(
-                    bot_module.bot.get_command(name)
+                    BOT.get_command(name)
                 )
 
-        b_view = bot_module.SGBPracticeView(123, object())
+        b_view = forms.SGBPracticeView(123, object())
         topic_select = next(
             child for child in b_view.children
-            if isinstance(child, bot_module.SGBTopicSelect)
+            if isinstance(child, forms.SGBTopicSelect)
         )
         self.assertEqual(
             len(topic_select.options),
-            len(bot_module.SG_B_TOPICS),
+            len(sg_features.SG_B_TOPICS),
         )
 
     def test_sglog_view_has_all_practice_categories(self):
-        view = bot_module.SGStudyLogView(
+        view = forms.SGStudyLogView(
             owner_id=123,
             target_channel=object(),
         )
         select = next(
             child
             for child in view.children
-            if isinstance(child, bot_module.SGCategorySelect)
+            if isinstance(child, forms.SGCategorySelect)
         )
 
         self.assertEqual(len(select.options), 14)
         self.assertEqual(
             [option.value for option in select.options],
-            list(bot_module.SG_PRACTICE_CATEGORIES),
+            list(study_log_parser.SG_PRACTICE_CATEGORIES),
         )
 
     def test_builds_exact_structured_analysis(self):
-        analysis = bot_module.build_structured_sg_analysis(
+        analysis = analysis_module.build_structured_sg_analysis(
             "情報セキュリティ",
             25,
             40.3,
@@ -99,13 +107,13 @@ class StructuredSGLogTests(unittest.TestCase):
 
 class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_plan_uses_recorded_category_scores(self):
-        original_get_status = bot_module.get_study_status
+        original_get_status = plan_feature.get_study_status
         original_get_week_total = (
-            bot_module.get_week_total_seconds
+            plan_feature.get_week_total_seconds
         )
-        original_ask_ollama = bot_module.ask_ollama
-        original_save_plan = bot_module.save_sg_plan
-        original_update_plan = bot_module.update_sg_plan_text
+        original_ask_ollama = plan_feature.ask_ollama
+        original_save_plan = plan_feature.save_sg_plan
+        original_update_plan = plan_feature.update_sg_plan_text
         captured_prompt = None
         saved_plan = None
 
@@ -137,23 +145,23 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
             saved_plan = (user_id, weeks, weekly_questions)
             return 1
 
-        bot_module.get_study_status = fake_get_status
-        bot_module.get_week_total_seconds = lambda user_id: 3600
-        bot_module.ask_ollama = fake_ask_ollama
-        bot_module.save_sg_plan = fake_save_plan
-        bot_module.update_sg_plan_text = lambda *args: None
+        plan_feature.get_study_status = fake_get_status
+        plan_feature.get_week_total_seconds = lambda user_id: 3600
+        plan_feature.ask_ollama = fake_ask_ollama
+        plan_feature.save_sg_plan = fake_save_plan
+        plan_feature.update_sg_plan_text = lambda *args: None
 
         try:
             ctx = _Context()
-            await bot_module.plan.callback(ctx, weeks=6)
+            await plan_feature.plan.callback(ctx, weeks=6)
         finally:
-            bot_module.get_study_status = original_get_status
-            bot_module.get_week_total_seconds = (
+            plan_feature.get_study_status = original_get_status
+            plan_feature.get_week_total_seconds = (
                 original_get_week_total
             )
-            bot_module.ask_ollama = original_ask_ollama
-            bot_module.save_sg_plan = original_save_plan
-            bot_module.update_sg_plan_text = original_update_plan
+            plan_feature.ask_ollama = original_ask_ollama
+            plan_feature.save_sg_plan = original_save_plan
+            plan_feature.update_sg_plan_text = original_update_plan
 
         self.assertIn("残り6週間", captured_prompt)
         self.assertIn(
@@ -166,7 +174,7 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
     async def test_plan_rejects_out_of_range_weeks(self):
         ctx = _Context()
 
-        await bot_module.plan.callback(ctx, weeks=0)
+        await plan_feature.plan.callback(ctx, weeks=0)
 
         self.assertIn("1〜16週", ctx.messages[0])
 
