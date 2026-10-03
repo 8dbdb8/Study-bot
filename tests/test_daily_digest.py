@@ -16,6 +16,7 @@ from studybot import voice
 from studybot.features import digest as digest_feature
 from studybot.features import plan as plan_feature
 from studybot.features import review as review_feature
+from studybot.weekly_report import is_weekly_report_enabled
 from studybot.daily_digest import (
     DEFAULT_DIGEST_TIME,
     get_digest_candidates,
@@ -109,9 +110,10 @@ class DigestDatabaseTests(_TempDBCase):
 
 
 class _Channel:
-    def __init__(self, name):
+    def __init__(self, name, guild=None):
         self.name = name
         self.id = 20
+        self.guild = guild
         self.sent = []
 
     async def send(self, **kwargs):
@@ -123,8 +125,8 @@ class _Guild:
     def __init__(self, members):
         self.id = 10
         self.members = members
-        self.channel = _Channel(config.STUDY_LOG_CHANNEL_NAME)
-        self.text_channels = [_Channel("雑談"), self.channel]
+        self.channel = _Channel(config.STUDY_LOG_CHANNEL_NAME, self)
+        self.text_channels = [_Channel("雑談", self), self.channel]
 
     async def fetch_member(self, user_id):
         if user_id not in self.members:
@@ -162,7 +164,7 @@ class SendDigestTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await digest_feature.send_daily_digests(self.fake_bot, now), 0)
         self.assertEqual(len(self.guild.channel.sent), 2)
 
-    async def test_afternoon_greeting_and_missing_channel(self):
+    async def test_greeting_depends_on_time_and_missing_channel(self):
         self.add_due_mistake(1)
         self.add_session(1, 10, "2026-10-14")
         self.add_due_mistake(4)
@@ -178,15 +180,33 @@ class SendDigestTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
             self.guild.channel.sent[0]["content"], "<@1> 今日の学習メニューです。"
         )
 
-    def test_catch_up_window(self):
-        def at(hour, minute=0):
-            return datetime(2026, 10, 15, hour, minute, tzinfo=config.JST)
+        # 平日の夜はねぎらいのひとこと
+        self.add_due_mistake(2)
+        self.add_session(2, 10, "2026-10-14")
+        await digest_feature.send_daily_digests(
+            self.fake_bot, datetime(2026, 10, 15, 19, 0, tzinfo=config.JST)
+        )
+        self.assertEqual(
+            self.guild.channel.sent[-1]["content"],
+            "<@2> おつかれさまです。今日の学習メニューです。",
+        )
 
-        with patch.object(digest_feature, "DIGEST_TIME", DEFAULT_DIGEST_TIME):
-            self.assertFalse(digest_feature.should_catch_up_digest(at(6, 59)))
-            self.assertTrue(digest_feature.should_catch_up_digest(at(7, 0)))
-            self.assertTrue(digest_feature.should_catch_up_digest(at(19, 59)))
-            self.assertFalse(digest_feature.should_catch_up_digest(at(20, 0)))
+    def test_weekday_evening_and_day_off_morning(self):
+        def at(day, hour, minute=0):
+            return datetime(2026, 10, day, hour, minute, tzinfo=config.JST)
+
+        due = digest_feature.is_digest_due
+        # 10/15（木）は平日：19時から
+        self.assertFalse(due(at(15, 7, 0)))
+        self.assertFalse(due(at(15, 18, 59)))
+        self.assertTrue(due(at(15, 19, 0)))
+        self.assertTrue(due(at(15, 21, 59)))
+        self.assertFalse(due(at(15, 22, 0)))
+        # 10/17（土）と 10/12（月・スポーツの日）は朝7時から
+        for day in (17, 12):
+            self.assertFalse(due(at(day, 6, 59)))
+            self.assertTrue(due(at(day, 7, 0)))
+            self.assertTrue(due(at(day, 19, 0)))
 
 
 class _Response:
@@ -320,15 +340,25 @@ class NotifyCommandTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
     async def test_toggle(self):
         ctx = _Context(1)
         await plan_feature.plan_notify.callback(ctx)
-        self.assertIn("**オン**", ctx.messages[-1]["content"])
+        content = ctx.messages[-1]["content"]
+        self.assertIn("学習メニュー：**オン**", content)
+        self.assertIn("週間レポート：**オン**", content)
+        self.assertIn("平日 19:00 / 土日祝 07:00", content)
+        self.assertIn("毎週日曜 21:00", content)
 
-        await plan_feature.plan_notify.callback(ctx, enabled="off")
+        await plan_feature.plan_notify.callback(ctx, menu="off")
         self.assertFalse(is_digest_enabled(self.db_path, 1))
+        self.assertTrue(is_weekly_report_enabled(self.db_path, 1))
         self.assertTrue(ctx.messages[-1]["ephemeral"])
+        self.assertIn("学習メニュー：**オフ**", ctx.messages[-1]["content"])
 
-        await plan_feature.plan_notify.callback(ctx, enabled="on")
+        await plan_feature.plan_notify.callback(ctx, menu="on", report="off")
         self.assertTrue(is_digest_enabled(self.db_path, 1))
-        self.assertIn("毎朝", ctx.messages[-1]["content"])
+        self.assertFalse(is_weekly_report_enabled(self.db_path, 1))
+        self.assertIn("週間レポート：**オフ**", ctx.messages[-1]["content"])
+
+        await plan_feature.plan_notify.callback(ctx, report="maybe")
+        self.assertIn("on か off", ctx.messages[-1]["content"])
 
 
 if __name__ == "__main__":

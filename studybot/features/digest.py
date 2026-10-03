@@ -1,4 +1,4 @@
-"""毎朝の学習メニューの組み立てと送信。"""
+"""学習メニュー（平日は夜・土日祝は朝）の組み立てと送信。"""
 
 import asyncio
 from datetime import datetime, time as dt_time
@@ -10,11 +10,13 @@ from studybot import config
 from studybot.channels import find_channel
 from studybot.config import (
     DIGEST_CATCH_UP_UNTIL_HOUR,
-    DIGEST_TIME,
+    DIGEST_TIME_HOLIDAY,
+    DIGEST_TIME_WEEKDAY,
     JST,
     REVIEW_SCORE_THRESHOLD,
 )
 from studybot.daily_digest import (
+    digest_datetime,
     get_digest_candidates,
     get_home_guild_id,
     mark_digest_sent,
@@ -36,7 +38,7 @@ from studybot.stats import (
 
 
 # ============================================================
-# 毎朝の学習メニュー
+# 学習メニュー（平日は夜・土日祝は朝）
 # ============================================================
 
 class DailyDigestView(discord.ui.View):
@@ -115,28 +117,40 @@ def build_daily_digest_embed(user_id, today):
     )
 
 
+async def find_home_channel(bot, user_id):
+    """その人が最近勉強したサーバーの勉強ログチャンネル。送れなければ None。"""
+    guild_id = get_home_guild_id(config.DB_PATH, user_id)
+    guild = bot.get_guild(guild_id) if guild_id else None
+    channel = find_channel(guild, "study_log")
+    if channel is None:
+        print(f"[notify] 送信先が見つかりません: user={user_id}")
+        return None
+
+    try:
+        await guild.fetch_member(user_id)
+    except discord.NotFound:
+        return None
+    return channel
+
+
 async def send_daily_digest(bot, user_id, today, now=None):
     """1人分を送る。送れたら True。"""
     embed = build_daily_digest_embed(user_id, today)
     if embed is None:
         return False
 
-    guild_id = get_home_guild_id(config.DB_PATH, user_id)
-    guild = bot.get_guild(guild_id) if guild_id else None
-    channel = find_channel(guild, "study_log")
+    channel = await find_home_channel(bot, user_id)
     if channel is None:
-        print(f"[digest] 送信先が見つかりません: user={user_id}")
-        return False
-
-    try:
-        await guild.fetch_member(user_id)
-    except discord.NotFound:
         return False
 
     now = now or datetime.now(JST)
-    greeting = (
-        "おはようございます。" if now.hour < 11 else ""
-    ) + "今日の学習メニューです。"
+    if now.hour < 11:
+        greeting = "おはようございます。"
+    elif now.hour >= 17:
+        greeting = "おつかれさまです。"
+    else:
+        greeting = ""
+    greeting += "今日の学習メニューです。"
     message = await channel.send(
         content=f"<@{user_id}> {greeting}",
         embed=embed,
@@ -146,7 +160,8 @@ async def send_daily_digest(bot, user_id, today, now=None):
         ),
     )
     mark_digest_sent(
-        config.DB_PATH, user_id, today, guild.id, channel.id, message.id
+        config.DB_PATH, user_id, today, channel.guild.id, channel.id,
+        message.id,
     )
     return True
 
@@ -171,15 +186,24 @@ async def send_daily_digests(bot, now=None):
     return sent
 
 
-def should_catch_up_digest(now):
-    """起動が通知時刻より遅れたとき、当日分をあとから送るか。"""
-    digest_at = now.replace(
-        hour=DIGEST_TIME.hour, minute=DIGEST_TIME.minute,
-        second=0, microsecond=0,
+def is_digest_due(now):
+    """今日の学習メニューを送る時刻を過ぎていて、まだ遅すぎないか。
+
+    平日は夜、土日祝は朝に送る。起動が遅れた日も、この判定で
+    当日分をあとから送る（同じ日に二度は送らない）。
+    """
+    digest_at = digest_datetime(
+        now.date(), DIGEST_TIME_WEEKDAY, DIGEST_TIME_HOLIDAY, JST
     )
     return digest_at <= now and now.hour < DIGEST_CATCH_UP_UNTIL_HOUR
 
 
-@tasks.loop(time=dt_time(DIGEST_TIME.hour, DIGEST_TIME.minute, tzinfo=JST))
+# 平日用と休日用の両方の時刻に起き、今日がどちらの日かは is_digest_due で判断する
+@tasks.loop(time=[
+    dt_time(DIGEST_TIME_WEEKDAY.hour, DIGEST_TIME_WEEKDAY.minute, tzinfo=JST),
+    dt_time(DIGEST_TIME_HOLIDAY.hour, DIGEST_TIME_HOLIDAY.minute, tzinfo=JST),
+])
 async def daily_digest_loop(bot):
-    await send_daily_digests(bot)
+    now = datetime.now(JST)
+    if is_digest_due(now):
+        await send_daily_digests(bot, now)

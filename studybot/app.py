@@ -22,6 +22,7 @@ from studybot.features import (
     setup,
     sg,
     time,
+    weekly_report,
 )
 from studybot.sg_glossary_history import (
     GLOSSARY_HISTORY_PATH,
@@ -30,7 +31,10 @@ from studybot.sg_glossary_history import (
 
 
 # 読み込むと各サブコマンドが /sg や /plan などのグループに登録される
-FEATURE_MODULES = (ai, data, digest, exam, glossary, plan, review, setup, sg, time)
+FEATURE_MODULES = (
+    ai, data, digest, exam, glossary, plan, review, setup, sg, time,
+    weekly_report,
+)
 
 
 def create_bot():
@@ -101,11 +105,14 @@ def create_bot():
             bot.add_view(voice.VCActionView())
             bot.add_view(digest.DailyDigestView())
             digest.daily_digest_loop.start(bot)
+            weekly_report.weekly_report_loop.start(bot)
             started = True
 
         now = datetime.now(config.JST)
-        if digest.should_catch_up_digest(now):
+        if digest.is_digest_due(now):
             await digest.send_daily_digests(bot, now)
+        if weekly_report.is_weekly_report_due(now):
+            await weekly_report.send_weekly_reports(bot, now)
 
     return bot
 

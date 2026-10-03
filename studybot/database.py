@@ -9,6 +9,7 @@ from studybot import config
 from studybot.channels import init_channel_settings_table
 from studybot.config import JST
 from studybot.daily_digest import init_daily_digest_tables
+from studybot.weekly_report import init_weekly_report_tables
 from studybot.exam_schedule import init_exam_date_table
 from studybot.formatting import parse_iso_datetime
 from studybot.sg_features import init_sg_feature_tables
@@ -367,6 +368,7 @@ def init_db():
     init_sg_glossary_rating_table(cursor)
     init_exam_date_table(cursor)
     init_daily_digest_tables(cursor)
+    init_weekly_report_tables(cursor)
     init_channel_settings_table(cursor)
 
     cursor.execute("""

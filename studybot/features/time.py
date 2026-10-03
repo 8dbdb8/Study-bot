@@ -1,11 +1,17 @@
 """/time グループ：勉強時間とログ。"""
 
-from datetime import datetime
+import asyncio
+from datetime import datetime, timedelta
 
+from discord import app_commands
+
+from studybot.charts import render_study_time_chart
 from studybot.config import JST
 from studybot.embeds import build_today_embed, build_week_embed
 from studybot.groups import time_group
+from studybot.replies import send_png
 from studybot.stats import (
+    get_daily_study_seconds,
     get_exam_countdown_line,
     get_study_streak_safe,
     get_today_logs,
@@ -81,3 +87,33 @@ async def logs(ctx):
         "📝 **今日の勉強ログ**\n"
         f"{text}"
     )
+
+
+CHART_PERIOD_CHOICES = [
+    app_commands.Choice(name="2週間", value=14),
+    app_commands.Choice(name="4週間", value=28),
+    app_commands.Choice(name="12週間", value=84),
+]
+
+
+@time_group.command(
+    name="chart",
+    description="日ごとの勉強時間をグラフで表示"
+)
+@app_commands.describe(days="表示する期間（省略すると4週間）")
+@app_commands.choices(days=CHART_PERIOD_CHOICES)
+async def time_chart(ctx, days: int = 28):
+    if days not in {choice.value for choice in CHART_PERIOD_CHOICES}:
+        days = 28
+    end = datetime.now(JST).date()
+    start = end - timedelta(days=days - 1)
+    daily = get_daily_study_seconds(ctx.author.id, start, end)
+    if not daily:
+        await ctx.send("この期間の勉強時間の記録がありません。")
+        return
+
+    async with ctx.typing():
+        png = await asyncio.to_thread(
+            render_study_time_chart, daily, start, end
+        )
+    await send_png(ctx, png, "study_time.png")

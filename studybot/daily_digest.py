@@ -1,20 +1,33 @@
-"""毎朝の学習メニュー通知の対象者・送信記録・オンオフ設定。"""
+"""学習メニュー通知の送る時刻・対象者・送信記録・オンオフ設定。"""
 
 import sqlite3
 from contextlib import closing
-from datetime import time
+from datetime import datetime, time
+
+import jpholiday
 
 
 DEFAULT_DIGEST_TIME = time(7, 0)
 
 
-def parse_digest_time(value):
-    """"HH:MM" を time に変換する。読めなければ既定の7:00。"""
+def parse_digest_time(value, default=DEFAULT_DIGEST_TIME):
+    """"HH:MM" を time に変換する。読めなければ default。"""
     try:
         hour, minute = (int(part) for part in str(value).strip().split(":"))
         return time(hour, minute)
     except (TypeError, ValueError):
-        return DEFAULT_DIGEST_TIME
+        return default
+
+
+def is_day_off(day):
+    """土日か日本の祝日（振替休日を含む）。"""
+    return day.weekday() >= 5 or jpholiday.is_holiday(day)
+
+
+def digest_datetime(day, weekday_time, holiday_time, tzinfo):
+    """その日の学習メニューを送る日時。平日は weekday_time、休日は holiday_time。"""
+    send_time = holiday_time if is_day_off(day) else weekday_time
+    return datetime.combine(day, send_time, tzinfo=tzinfo)
 
 
 def init_daily_digest_tables(cursor):

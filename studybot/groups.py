@@ -15,9 +15,9 @@ HELP_COMMAND_ORDER = (
     "sg", "review", "time", "plan", "ai", "data", "setup", "help",
 )
 HELP_SUBCOMMAND_ORDER = {
-    "sg": ("log", "b", "progress", "status", "glossary"),
+    "sg": ("log", "b", "progress", "chart", "status", "glossary"),
     "review": ("add", "list", "start", "answer"),
-    "time": ("today", "week", "logs"),
+    "time": ("today", "week", "chart", "logs"),
     "plan": ("new", "status", "exam", "notify", "roadmap"),
     "ai": ("today", "next", "report"),
 }

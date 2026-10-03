@@ -1,16 +1,21 @@
 """/sg グループ：SGの記録・進捗・累積成績。"""
 
+import asyncio
+
 import discord
+from discord import app_commands
 
 from studybot import config
+from studybot.charts import render_score_chart
 from studybot.config import REVIEW_SCORE_THRESHOLD
 from studybot.embeds import build_progress_embed, COLOR_DEFAULT
 from studybot.formatting import format_category_label, get_review_candidates
 from studybot.forms import build_sgb_prompt, build_sglog_prompt
 from studybot.groups import sg_group
-from studybot.replies import send_private
+from studybot.replies import send_png, send_private
 from studybot.sg_features import get_sg_b_summary, get_sg_category_progress
-from studybot.stats import get_study_status
+from studybot.stats import get_daily_scores, get_study_status
+from studybot.study_log_parser import SG_PRACTICE_CATEGORIES
 
 
 @sg_group.command(
@@ -142,3 +147,38 @@ async def status(ctx):
         name="要復習候補", value=review_text[:1024], inline=False
     )
     await ctx.send(embed=embed)
+
+
+@sg_group.command(
+    name="chart",
+    description="SGの正答率と問題数の推移をグラフで表示"
+)
+@app_commands.describe(category="分野（省略すると全体）")
+@app_commands.choices(category=[
+    app_commands.Choice(name="全体", value="all"),
+    *(
+        app_commands.Choice(name=name, value=name)
+        for name in SG_PRACTICE_CATEGORIES
+    ),
+])
+async def sg_chart(ctx, category: str = "all"):
+    if category != "all" and category not in SG_PRACTICE_CATEGORIES:
+        await ctx.send("分野は候補から選んでください。")
+        return
+
+    points = get_daily_scores(
+        ctx.author.id, "SG", None if category == "all" else category
+    )
+    if not points:
+        await ctx.send("グラフにできるSGの記録がまだありません。")
+        return
+
+    label = "全体" if category == "all" else category
+    async with ctx.typing():
+        png = await asyncio.to_thread(
+            render_score_chart,
+            points,
+            f"SG 正答率の推移（{label}）",
+            REVIEW_SCORE_THRESHOLD,
+        )
+    await send_png(ctx, png, "sg_score.png")

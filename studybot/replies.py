@@ -1,5 +1,10 @@
 """スラッシュコマンドなら本人だけに返す、などの送信の共通処理。"""
 
+from io import BytesIO
+
+import discord
+
+
 def _message_kwargs(content=None, view=None, embed=None):
     kwargs = {}
     if content is not None:
@@ -23,3 +28,8 @@ async def respond_private(interaction, content=None, view=None, embed=None):
     await interaction.response.send_message(
         ephemeral=True, **_message_kwargs(content, view, embed)
     )
+
+
+async def send_png(ctx, png, filename):
+    """PNG画像（bytes）をファイルとして送る。"""
+    await ctx.send(file=discord.File(BytesIO(png), filename=filename))

@@ -2,12 +2,18 @@
 
 from datetime import datetime
 
+
 import aiohttp
 from discord import app_commands
 
 from studybot import config
 from studybot.channels import channel_label
-from studybot.config import DIGEST_TIME, JST
+from studybot.config import (
+    DIGEST_TIME_HOLIDAY,
+    DIGEST_TIME_WEEKDAY,
+    JST,
+    WEEKLY_REPORT_TIME,
+)
 from studybot.daily_digest import is_digest_enabled, set_digest_enabled
 from studybot.embeds import build_plan_status_embed
 from studybot.exam_schedule import (
@@ -36,6 +42,10 @@ from studybot.stats import (
     get_roadmap,
     get_study_status,
     get_week_total_seconds,
+)
+from studybot.weekly_report import (
+    is_weekly_report_enabled,
+    set_weekly_report_enabled,
 )
 
 
@@ -323,36 +333,58 @@ async def plan_status(ctx):
     ))
 
 
-@plan_group.command(
-    name="notify",
-    description="毎朝の学習メニュー通知をオン・オフ"
-)
-@app_commands.describe(enabled="通知を受け取るかどうか")
-@app_commands.choices(enabled=[
+ON_OFF_CHOICES = [
     app_commands.Choice(name="オン", value="on"),
     app_commands.Choice(name="オフ", value="off"),
-])
-async def plan_notify(ctx, enabled: str | None = None):
-    if enabled is None:
-        state = "オン" if is_digest_enabled(config.DB_PATH, ctx.author.id) else "オフ"
-        await send_private(
-            ctx,
-            f"毎朝の学習メニュー通知は今 **{state}** です。"
-            "`/plan notify enabled:オン` / `オフ` で切り替えられます。",
+]
+
+
+def _notify_schedule_text(guild):
+    channel = channel_label(guild, "study_log")
+    return (
+        f"・学習メニュー：平日 {DIGEST_TIME_WEEKDAY.strftime('%H:%M')} / "
+        f"土日祝 {DIGEST_TIME_HOLIDAY.strftime('%H:%M')} に {channel} へ"
+        "（復習・週目標・試験日のどれもない日は送りません）\n"
+        f"・週間レポート：毎週日曜 {WEEKLY_REPORT_TIME.strftime('%H:%M')} に "
+        f"{channel} へ（その週に勉強の記録がある場合）"
+    )
+
+
+@plan_group.command(
+    name="notify",
+    description="学習メニューと週間レポートの自動通知をオン・オフ"
+)
+@app_commands.describe(
+    menu="学習メニュー（平日の夜・土日祝の朝）",
+    report="週間レポート（日曜の夜）",
+)
+@app_commands.choices(menu=ON_OFF_CHOICES, report=ON_OFF_CHOICES)
+async def plan_notify(ctx, menu: str | None = None, report: str | None = None):
+    for value in (menu, report):
+        if value not in (None, "on", "off"):
+            await send_private(ctx, "on か off を指定してください。")
+            return
+
+    if menu is not None:
+        set_digest_enabled(config.DB_PATH, ctx.author.id, menu == "on")
+    if report is not None:
+        set_weekly_report_enabled(
+            config.DB_PATH, ctx.author.id, report == "on"
         )
-        return
 
-    if enabled not in ("on", "off"):
-        await send_private(ctx, "on か off を指定してください。")
-        return
+    def state(enabled):
+        return "オン" if enabled else "オフ"
 
-    set_digest_enabled(config.DB_PATH, ctx.author.id, enabled == "on")
-    if enabled == "on":
-        message = (
-            f"毎朝 {DIGEST_TIME.strftime('%H:%M')} に "
-            f"{channel_label(ctx.guild, 'study_log')} へ学習メニューを送ります。"
-            "復習・週目標・試験日のどれもない日は送りません。"
+    lines = []
+    if menu is None and report is None:
+        lines.append(
+            "`/plan notify menu:オフ` や `report:オン` で切り替えられます。"
         )
     else:
-        message = "毎朝の学習メニュー通知をオフにしました。"
-    await send_private(ctx, message)
+        lines.append("通知の設定を変更しました。")
+    lines.append(
+        f"学習メニュー：**{state(is_digest_enabled(config.DB_PATH, ctx.author.id))}**"
+        f"　週間レポート：**{state(is_weekly_report_enabled(config.DB_PATH, ctx.author.id))}**"
+    )
+    lines.append(_notify_schedule_text(ctx.guild))
+    await send_private(ctx, "\n".join(lines))

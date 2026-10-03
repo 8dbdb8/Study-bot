@@ -3,7 +3,8 @@
 import json
 import sqlite3
 from collections import Counter
-from datetime import datetime, timedelta
+from contextlib import closing
+from datetime import date, datetime, timedelta
 
 from studybot import config
 from studybot.config import JST
@@ -563,3 +564,78 @@ def get_week_analysis_status(
             weak_point_counter.most_common(5),
         "log_count": len(rows)
     }
+
+
+# ============================================================
+# グラフ用の日ごとの集計
+# ============================================================
+
+def get_daily_study_seconds(user_id, start_date, end_date):
+    """start_date〜end_date の日ごとのVC勉強時間（秒）。記録のない日は含まない。"""
+    with closing(sqlite3.connect(config.DB_PATH)) as conn:
+        rows = conn.execute("""
+            SELECT study_date, COALESCE(SUM(duration_seconds), 0)
+            FROM study_sessions
+            WHERE user_id = ? AND study_date BETWEEN ? AND ?
+            GROUP BY study_date
+        """, (
+            user_id, start_date.isoformat(), end_date.isoformat(),
+        )).fetchall()
+    return {date.fromisoformat(day): seconds for day, seconds in rows}
+
+
+def get_daily_scores(user_id, qualification="SG", category=None):
+    """日ごとの問題数と正答率。正答率は問題数で重み付けした平均。
+
+    category を指定すると、その分野（科目A）の記録だけを集計する。
+    戻り値は [(日付, 問題数, 正答率 or None), ...]（日付の昇順）。
+    """
+    with closing(sqlite3.connect(config.DB_PATH)) as conn:
+        if category is None:
+            rows = conn.execute("""
+                SELECT l.study_date, a.questions, a.correct_answers,
+                       a.score_percent
+                FROM study_log_analysis AS a
+                JOIN study_logs AS l ON l.message_id = a.message_id
+                WHERE a.user_id = ? AND a.qualification = ?
+            """, (user_id, qualification)).fetchall()
+        else:
+            rows = conn.execute("""
+                SELECT l.study_date, c.questions, c.correct_answers,
+                       c.score_percent
+                FROM study_log_category_results AS c
+                JOIN study_log_analysis AS a ON a.message_id = c.message_id
+                JOIN study_logs AS l ON l.message_id = a.message_id
+                WHERE a.user_id = ? AND a.qualification = ?
+                  AND COALESCE(a.exam_section, 'A') = 'A'
+                  AND c.category = ?
+            """, (user_id, qualification, category)).fetchall()
+
+    days = {}
+    for study_date, questions, correct, score in rows:
+        day = days.setdefault(date.fromisoformat(study_date), {
+            "questions": 0, "weighted": 0.0, "scored_questions": 0,
+            "scores": [],
+        })
+        day["questions"] += questions or 0
+        if score is None and correct is None:
+            continue
+        if questions:
+            day["weighted"] += (
+                correct * 100 if correct is not None else score * questions
+            )
+            day["scored_questions"] += questions
+        elif score is not None:
+            day["scores"].append(score)
+
+    result = []
+    for day in sorted(days):
+        item = days[day]
+        if item["scored_questions"]:
+            score = item["weighted"] / item["scored_questions"]
+        elif item["scores"]:
+            score = sum(item["scores"]) / len(item["scores"])
+        else:
+            score = None
+        result.append((day, item["questions"], score))
+    return result

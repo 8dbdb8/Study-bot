@@ -1,6 +1,7 @@
 """StudyBot の設定値。.env から読む値と、コード内の決まりごと。"""
 
 import os
+from datetime import time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -49,12 +50,20 @@ DB_PATH = str(PROJECT_ROOT / "data" / "study.db")
 # 分野別正答率がこの値未満なら要復習候補
 REVIEW_SCORE_THRESHOLD = 60.0
 
-# 毎朝の学習メニューを送る時刻（.env の STUDYBOT_DIGEST_TIME で変更可）
-DIGEST_TIME = parse_digest_time(
-    os.getenv("STUDYBOT_DIGEST_TIME", "07:00")
+# 学習メニューを送る時刻。平日は夜、土日祝は朝。
+# .env の STUDYBOT_DIGEST_TIME_WEEKDAY / STUDYBOT_DIGEST_TIME_HOLIDAY で変更可
+DIGEST_TIME_WEEKDAY = parse_digest_time(
+    os.getenv("STUDYBOT_DIGEST_TIME_WEEKDAY", "19:00"), default=time(19, 0)
+)
+DIGEST_TIME_HOLIDAY = parse_digest_time(
+    os.getenv("STUDYBOT_DIGEST_TIME_HOLIDAY", "07:00"), default=time(7, 0)
 )
 
 # 再起動が遅れたとき、この時刻までなら当日分をあとから送る
-DIGEST_CATCH_UP_UNTIL_HOUR = 20
+DIGEST_CATCH_UP_UNTIL_HOUR = 22
+
+# 週間レポートを自動で送る曜日（0=月曜 … 6=日曜）と時刻
+WEEKLY_REPORT_WEEKDAY = 6
+WEEKLY_REPORT_TIME = time(21, 0)
 
 BOT_VERSION = "3.0"

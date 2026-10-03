@@ -3,8 +3,11 @@
 from datetime import datetime
 
 import aiohttp
+import discord
 
 from studybot.config import JST
+from studybot.embeds import COLOR_DEFAULT, format_minutes
+from studybot.exam_schedule import WEEKDAY_LABELS
 from studybot.formatting import (
     format_category_label,
     format_duration,
@@ -151,95 +154,35 @@ async def next_study(ctx):
             )
 
 
-@ai_group.command(
-    name="report",
-    description="今週のSG学習レポートをAIが作成"
-)
-async def report(ctx):
-    qualification = "SG"
-
-    week_rows = get_week_total(
-        ctx.author.id
-    )
-
-    total_seconds = sum(
-        seconds
-        for _, seconds
-        in week_rows
-    )
-
-    day_names = {
-        0: "月",
-        1: "火",
-        2: "水",
-        3: "木",
-        4: "金",
-        5: "土",
-        6: "日"
-    }
+def collect_weekly_report(user_id, qualification="SG"):
+    """今週（月曜〜今日）の集計。週報にできる記録がなければ None。"""
+    week_rows = get_week_total(user_id)
+    total_seconds = sum(seconds for _, seconds in week_rows)
 
     daily_lines = []
-
-    for (
-        study_date,
-        day_seconds
-    ) in week_rows:
-
-        date_obj = datetime.strptime(
-            study_date,
-            "%Y-%m-%d"
-        )
-
-        day = day_names[
-            date_obj.weekday()
+    for study_date, day_seconds in week_rows:
+        weekday = WEEKDAY_LABELS[
+            datetime.strptime(study_date, "%Y-%m-%d").weekday()
         ]
-
         daily_lines.append(
-            f"- {day}曜日："
-            f"{format_duration(day_seconds)}"
+            f"- {weekday}曜日：{format_duration(day_seconds)}"
         )
+    daily_text = "\n".join(daily_lines) if daily_lines else "記録なし"
 
-    if daily_lines:
-        daily_text = "\n".join(
-            daily_lines
-        )
-    else:
-        daily_text = "記録なし"
+    report_status = get_week_analysis_status(user_id, qualification)
+    total_questions = report_status["total_questions"]
+    average_score = report_status["average_score"]
+    log_count = report_status["log_count"]
 
-    report_status = (
-        get_week_analysis_status(
-            ctx.author.id,
-            qualification
-        )
+    if total_seconds == 0 and log_count == 0:
+        return None
+
+    score_text = (
+        f"{average_score:.1f}%" if average_score is not None else "記録なし"
     )
-
-    total_questions = (
-        report_status[
-            "total_questions"
-        ]
-    )
-
-    average_score = (
-        report_status[
-            "average_score"
-        ]
-    )
-
-    log_count = (
-        report_status[
-            "log_count"
-        ]
-    )
-
-    if average_score is not None:
-        score_text = (
-            f"{average_score:.1f}%"
-        )
-    else:
-        score_text = "記録なし"
 
     week_categories = get_category_status(
-        ctx.author.id,
+        user_id,
         qualification,
         report_status["start_date"],
         report_status["end_date"]
@@ -272,45 +215,49 @@ async def report(ctx):
         else "現在はなし"
     )
 
-    if (
-        total_seconds == 0
-        and log_count == 0
-    ):
-        await ctx.send(
-            "📊 今週はまだ週報を作れる"
-            "学習記録がありません。"
-        )
-        return
+    return {
+        "start_date": report_status["start_date"],
+        "end_date": report_status["end_date"],
+        "total_seconds": total_seconds,
+        "daily_text": daily_text,
+        "log_count": log_count,
+        "total_questions": total_questions,
+        "score_text": score_text,
+        "category_text": category_text,
+        "review_text": review_text,
+    }
 
-    prompt = f"""
+
+def build_weekly_report_prompt(data):
+    return f"""
 今週の資格勉強について週報を作成してください。
 
 【対象資格】
 情報セキュリティマネジメント（SG）
 
 【期間】
-{report_status["start_date"]} 〜 {report_status["end_date"]}
+{data["start_date"]} 〜 {data["end_date"]}
 
 【今週の総勉強時間】
-{format_duration(total_seconds)}
+{format_duration(data["total_seconds"])}
 
 【曜日別の勉強時間】
-{daily_text}
+{data["daily_text"]}
 
 【解析済み勉強ログ】
-{log_count}件
+{data["log_count"]}件
 
 【解いた問題数】
-{total_questions}問
+{data["total_questions"]}問
 
 【問題数で重み付けした平均正答率】
-{score_text}
+{data["score_text"]}
 
 【分野別成績】
-{category_text}
+{data["category_text"]}
 
 【要復習候補（60%未満）】
-{review_text}
+{data["review_text"]}
 
 【データの読み方に関する重要ルール】
 - 1回の結果だけで弱点と断定しない
@@ -336,45 +283,75 @@ AIからの提案として3項目以内で提案する。
 要復習候補と総合問題をバランスよく提案する。
 """
 
+
+# Embed の本文の上限（4096文字）に余裕を持たせる
+REPORT_TEXT_LIMIT = 3900
+
+
+def build_weekly_report_embed(data, answer=None, ai_error=None):
+    if answer:
+        description = answer.strip()
+        if len(description) > REPORT_TEXT_LIMIT:
+            description = description[:REPORT_TEXT_LIMIT].rstrip() + "\n…（長いため省略）"
+    else:
+        description = (
+            "AIのコメントは作れませんでした"
+            + (f"（{ai_error}）" if ai_error else "")
+            + "。数字のまとめだけお送りします。"
+        )
+
+    embed = discord.Embed(
+        title="SG 週間レポート",
+        description=description,
+        color=COLOR_DEFAULT,
+    )
+    embed.add_field(
+        name="期間",
+        value=f"{data['start_date']} 〜 {data['end_date']}",
+        inline=False,
+    )
+    embed.add_field(
+        name="勉強時間", value=format_minutes(data["total_seconds"])
+    )
+    embed.add_field(name="問題数", value=f"{data['total_questions']}問")
+    embed.add_field(name="平均正答率", value=data["score_text"])
+    return embed
+
+
+async def create_weekly_report_embed(user_id):
+    """今週の週報。記録がなければ None。AIが使えなくても数字だけで作る。"""
+    data = collect_weekly_report(user_id)
+    if data is None:
+        return None
+
+    try:
+        answer = await ask_ollama(build_weekly_report_prompt(data))
+    except aiohttp.ClientConnectorError:
+        return build_weekly_report_embed(
+            data, ai_error="Ollamaに接続できません"
+        )
+    except Exception as e:
+        print(f"[report] AIの処理に失敗: {e}")
+        return build_weekly_report_embed(data, ai_error="AIの処理に失敗")
+    return build_weekly_report_embed(data, answer)
+
+
+@ai_group.command(
+    name="report",
+    description="今週のSG学習レポートをAIが作成"
+)
+async def report(ctx):
     async with ctx.typing():
-        try:
-            answer = await ask_ollama(
-                prompt
-            )
+        embed = await create_weekly_report_embed(ctx.author.id)
 
-            await ctx.send(
-                "📊 **SG 週間レポート**\n\n"
-                f"📅 期間：**"
-                f"{report_status['start_date']} "
-                f"〜 "
-                f"{report_status['end_date']}**\n"
-                f"⏱️ 勉強時間：**"
-                f"{format_duration(total_seconds)}**\n"
-                f"🔢 問題数：**"
-                f"{total_questions}問**\n"
-                f"🎯 平均正答率：**"
-                f"{score_text}**\n\n"
-                f"{answer}"
-            )
+    if embed is None:
+        await ctx.send(
+            "📊 今週はまだ週報を作れる"
+            "学習記録がありません。"
+        )
+        return
 
-        except aiohttp.ClientConnectorError:
-            await ctx.send(
-                "⚠️ Ollamaに接続できません。\n"
-                "Ollamaが起動しているか"
-                "確認してください。"
-            )
-
-        except Exception as e:
-            print(
-                f"❌ report エラー: {e}"
-            )
-
-            await ctx.send(
-                "⚠️ 週間レポートの作成に"
-                "失敗しました。\n"
-                "VS Codeのターミナルを"
-                "確認してください。"
-            )
+    await ctx.send(embed=embed)
 
 
 @ai_group.command(
