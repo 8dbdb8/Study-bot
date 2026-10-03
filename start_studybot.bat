@@ -43,8 +43,8 @@ if errorlevel 1 (
     )
 )
 
-REM StudyBot起動
-".venv\Scripts\python.exe" -u bot.py >> studybot.log 2>&1
+REM StudyBot起動（操作メニューがこのBotのプロセスを識別できるよう絶対パスを使用）
+"%~dp0.venv\Scripts\python.exe" -u "%~dp0bot.py" >> studybot.log 2>&1
 
 set "BOT_EXIT_CODE=%ERRORLEVEL%"
 echo [%date% %time%] StudyBot stopped with exit code %BOT_EXIT_CODE%. >> studybot.log

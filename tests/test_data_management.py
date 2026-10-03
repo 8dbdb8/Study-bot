@@ -17,6 +17,9 @@ from data_management import (
     prepare_reset,
     reset_user_data,
 )
+from sg_glossary import (
+    GlossaryEntry, get_sg_glossary_ratings, save_sg_glossary_rating,
+)
 from sg_features import add_sg_mistake, save_sg_b_practice, save_sg_plan
 
 
@@ -209,7 +212,45 @@ class DataManagementTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "通話勉強中"):
             prepare_reset(self.db_path, 123, "all")
 
+    def test_glossary_rating_overview_and_reset_are_owner_scoped(self):
+        first = GlossaryEntry("認証", "本人確認", "セキュリティ")
+        second = GlossaryEntry("暗号", "情報を読めなくする", "セキュリティ")
+        save_sg_glossary_rating(self.db_path, 123, first, "できた")
+        save_sg_glossary_rating(self.db_path, 999, first, "できなかった")
+        self.assertEqual(get_overview(self.db_path, 123)["glossary_ratings"], {
+            "total": 1, "done": 1, "failed": 0,
+            "needs_review": 0, "unsure": 0,
+        })
+        self.assertIn("SG単語帳の自己評価：1語", bot._data_home_text(123))
+
+        stale_ids = prepare_reset(self.db_path, 123, "glossary_ratings")
+        save_sg_glossary_rating(self.db_path, 123, first, "微妙")
+        with self.assertRaisesRegex(ValueError, "記録が変わりました"):
+            reset_user_data(self.db_path, 123, "glossary_ratings", stale_ids)
+
+        stale_ids = prepare_reset(self.db_path, 123, "glossary_ratings")
+        save_sg_glossary_rating(self.db_path, 123, second, "まだ要復習")
+        with self.assertRaisesRegex(ValueError, "記録が変わりました"):
+            reset_user_data(self.db_path, 123, "glossary_ratings", stale_ids)
+
+        self.assertEqual(get_overview(self.db_path, 123)["glossary_ratings"], {
+            "total": 2, "done": 0, "failed": 0,
+            "needs_review": 1, "unsure": 1,
+        })
+        self.assertEqual(reset_user_data(
+            self.db_path, 123, "glossary_ratings",
+            prepare_reset(self.db_path, 123, "glossary_ratings"),
+        ), 2)
+        self.assertEqual(get_sg_glossary_ratings(
+            self.db_path, 123, [first, second],
+        ), {})
+        self.assertEqual(get_overview(self.db_path, 123)
+                         ["glossary_ratings"]["total"], 0)
+        self.assertEqual(get_overview(self.db_path, 999)
+                         ["glossary_ratings"]["total"], 1)
+
     def test_reset_all_removes_only_owners_related_rows(self):
+        glossary_entry = GlossaryEntry("認証", "本人確認", "セキュリティ")
         for user_id, message_id in ((123, 109), (999, 110)):
             self.save_log(
                 user_id, message_id,
@@ -234,11 +275,16 @@ class DataManagementTests(unittest.TestCase):
                 self.db_path, user_id, 6, 30, start.isoformat(),
                 today=date(2026, 9, 29),
             )
+            save_sg_glossary_rating(
+                self.db_path, user_id, glossary_entry, "できた",
+            )
         ids = prepare_reset(self.db_path, 123, "all")
-        self.assertEqual(reset_user_data(self.db_path, 123, "all", ids), 4)
+        self.assertEqual(reset_user_data(self.db_path, 123, "all", ids), 5)
         own = get_overview(self.db_path, 123)
         other = get_overview(self.db_path, 999)
-        for key in ("logs", "sessions", "mistakes", "plans"):
+        for key in (
+            "logs", "sessions", "mistakes", "plans", "glossary_ratings",
+        ):
             self.assertEqual(own[key]["total"], 0)
             self.assertEqual(other[key]["total"], 1)
         with closing(sqlite3.connect(self.db_path)) as conn:

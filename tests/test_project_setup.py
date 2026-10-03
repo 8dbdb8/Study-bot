@@ -61,7 +61,8 @@ class ProjectSetupFilesTests(unittest.TestCase):
             "DISCORD_TOKEN",
             "勉強部屋",
             "勉強ログ",
-            "/sglog",
+            "/sg log",
+            "/help",
         ):
             with self.subTest(text=text):
                 self.assertIn(text, readme)

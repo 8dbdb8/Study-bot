@@ -27,13 +27,13 @@ class _Context:
 class StructuredSGLogTests(unittest.TestCase):
     def test_sglog_command_is_registered(self):
         self.assertIsNotNone(
-            bot_module.bot.get_command("sglog")
+            bot_module.bot.get_command("sg log")
         )
 
     def test_sg_study_commands_are_registered(self):
         for name in (
-            "mistake", "reviews", "review", "sgprogress",
-            "sgb", "plan_status",
+            "review add", "review list", "review answer",
+            "sg progress", "sg b", "plan status",
         ):
             with self.subTest(name=name):
                 self.assertIsNotNone(

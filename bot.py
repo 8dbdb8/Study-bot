@@ -1,9 +1,12 @@
 import os
 import json
+import random
 import sqlite3
+from uuid import uuid4
 from collections import Counter
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from types import SimpleNamespace
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import aiohttp
@@ -49,6 +52,41 @@ from sg_features import (
     score_from_counts,
     update_sg_plan_text,
 )
+from sg_glossary import (
+    GLOSSARY_PATH,
+    SG_GLOSSARY_RATINGS,
+    SOURCE_GLOSSARY_URL,
+    GlossaryDataError,
+    glossary_entry_key,
+    init_sg_glossary_rating_table,
+    load_glossary,
+    get_sg_glossary_ratings,
+    save_sg_glossary_rating,
+    search_glossary,
+    split_text,
+)
+from exam_schedule import (
+    WEEKDAY_LABELS,
+    build_exam_date,
+    days_in_month,
+    delete_exam_date,
+    exam_year_choices,
+    format_exam_countdown,
+    format_japanese_date,
+    format_plan_schedule,
+    get_exam_date,
+    get_study_streak,
+    init_exam_date_table,
+    save_exam_date,
+    strip_week_heading_dates,
+    weeks_until,
+)
+from sg_glossary_history import (
+    GLOSSARY_HISTORY_PATH,
+    init_glossary_history_db,
+    record_glossary_card,
+    set_glossary_summary_message_id,
+)
 
 
 # ============================================================
@@ -67,6 +105,22 @@ STUDY_LOG_CHANNEL_NAME = "勉強ログ"
 
 # VC退出時の通知先
 STUDY_NOTIFICATION_CHANNEL_NAME = "勉強ログ"
+
+# SG用語集コマンドの利用先
+SG_GLOSSARY_CHANNEL_NAME = "SG用語集"
+SG_GLOSSARY_CATEGORIES = (
+    "セキュリティ",
+    "法務",
+    "システム構成要素",
+    "データベース",
+    "ネットワーク",
+    "プロジェクトマネジメント",
+    "サービスマネジメント",
+    "システム監査",
+    "システム戦略",
+    "システム企画",
+    "企業活動",
+)
 
 # Ollama
 OLLAMA_URL = "http://localhost:11434/api/chat"
@@ -92,7 +146,9 @@ intents.voice_states = True
 
 bot = commands.Bot(
     command_prefix="!",
-    intents=intents
+    intents=intents,
+    # 標準の !help の代わりに独自の /help を使う
+    help_command=None,
 )
 
 # 二重同期を避ける
@@ -509,6 +565,8 @@ def init_db():
         """)
 
     init_sg_feature_tables(cursor)
+    init_sg_glossary_rating_table(cursor)
+    init_exam_date_table(cursor)
 
     cursor.execute("""
         DELETE FROM study_log_category_results
@@ -1004,6 +1062,50 @@ def get_current_qualification():
         "qualification": row[0],
         "display_name": row[1]
     }
+
+
+def get_current_exam_target(user_id):
+    """現在の最優先資格と、本人が設定した試験日（未設定ならNone）。"""
+    try:
+        current = get_current_qualification()
+    except sqlite3.Error:
+        current = None
+
+    qualification = current["qualification"] if current else "SG"
+
+    try:
+        exam_on = get_exam_date(DB_PATH, user_id, qualification)
+    except sqlite3.Error:
+        exam_on = None
+
+    return {
+        "qualification": qualification,
+        "display_name": (
+            current["display_name"] if current else qualification
+        ),
+        "label": f"{qualification}試験",
+        "exam_on": exam_on,
+    }
+
+
+def get_exam_countdown_line(user_id, today=None):
+    target = get_current_exam_target(user_id)
+    if target["exam_on"] is None:
+        return None
+    return format_exam_countdown(
+        target["exam_on"],
+        today or datetime.now(JST).date(),
+        target["label"],
+    )
+
+
+def get_study_streak_safe(user_id, today=None):
+    try:
+        return get_study_streak(
+            DB_PATH, user_id, today or datetime.now(JST).date()
+        )
+    except sqlite3.Error:
+        return 0
 
 
 # ============================================================
@@ -2125,7 +2227,7 @@ class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
         await interaction.response.send_message(
             f"誤答 #{mistake_id} を登録しました。"
             f"次の復習日：{due.isoformat()}\n"
-            "復習するときは `/reviews` を開いてください。",
+            "復習するときは `/review list` を開いてください。",
             ephemeral=True,
         )
 
@@ -2276,7 +2378,7 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
             if saved:
                 await interaction.followup.send(
                     "科目BはDBに記録済みですが、Discord表示の更新に"
-                    "失敗しました。`/sgprogress` で確認してください。",
+                    "失敗しました。`/sg progress` で確認してください。",
                     ephemeral=True,
                 )
                 return
@@ -2845,19 +2947,121 @@ async def delete_study_message(payload):
 # !xxx と /xxx の両方で使える
 # ============================================================
 
-@bot.hybrid_command(
-    name="hello",
-    description="StudyBotの接続確認"
-)
-async def hello(ctx):
-    await ctx.send(
-        "こんにちは！📚 StudyBotです！"
+# ============================================================
+# コマンドグループと /help
+# ============================================================
+
+# /help に表示する順番
+HELP_COMMAND_ORDER = ("sg", "review", "time", "plan", "ai", "data", "help")
+HELP_SUBCOMMAND_ORDER = {
+    "sg": ("log", "b", "progress", "status", "glossary"),
+    "review": ("add", "list", "answer"),
+    "time": ("today", "week", "logs"),
+    "plan": ("new", "status", "exam", "roadmap"),
+    "ai": ("today", "next", "report"),
+}
+
+
+def _ordered_subcommands(group):
+    order = HELP_SUBCOMMAND_ORDER.get(group.name, ())
+    return sorted(
+        group.commands,
+        key=lambda sub: (
+            order.index(sub.name) if sub.name in order else len(order)
+        ),
     )
 
 
+def build_help_text():
+    commands_by_name = {
+        command.name: command
+        for command in bot.tree.get_commands()
+    }
+    lines = [
+        "**StudyBot の使い方**",
+        f"ボイスチャンネル「{STUDY_VOICE_CHANNEL_NAME}」に入ると勉強時間を自動で記録します。"
+        "結果は `/sg log`、間違えた問題は `/review add` で登録してください。",
+    ]
+    for name in HELP_COMMAND_ORDER:
+        command = commands_by_name.get(name)
+        if command is None:
+            continue
+        lines.append(f"\n**/{name}**　{command.description}")
+        if getattr(command, "commands", None):
+            lines.extend(
+                f"　`/{name} {sub.name}`　{sub.description}"
+                for sub in _ordered_subcommands(command)
+            )
+    return "\n".join(lines)
+
+
+async def send_group_help(ctx):
+    """サブコマンドなしで !sg などが呼ばれたときの案内。"""
+    group = ctx.command
+    lines = [f"**/{group.name}**　{group.description}"]
+    lines.extend(
+        f"　`/{group.name} {sub.name}`　{sub.description}"
+        for sub in _ordered_subcommands(group)
+    )
+    await ctx.send("\n".join(lines))
+
+
+@bot.hybrid_group(
+    name="sg",
+    description="SGの記録・進捗・用語集",
+    invoke_without_command=True,
+)
+async def sg_group(ctx):
+    await send_group_help(ctx)
+
+
+@bot.hybrid_group(
+    name="review",
+    description="間違えた問題の復習",
+    invoke_without_command=True,
+)
+async def review_group(ctx):
+    await send_group_help(ctx)
+
+
+@bot.hybrid_group(
+    name="time",
+    description="勉強時間とログ",
+    invoke_without_command=True,
+)
+async def time_group(ctx):
+    await send_group_help(ctx)
+
+
+@bot.hybrid_group(
+    name="plan",
+    description="学習計画・試験日・ロードマップ",
+    invoke_without_command=True,
+)
+async def plan_group(ctx):
+    await send_group_help(ctx)
+
+
+@bot.hybrid_group(
+    name="ai",
+    description="AIコーチによる分析と提案",
+    invoke_without_command=True,
+)
+async def ai_group(ctx):
+    await send_group_help(ctx)
+
+
 @bot.hybrid_command(
+    name="help",
+    description="StudyBotのコマンド一覧と使い方"
+)
+async def help_command(ctx):
+    await ctx.send(build_help_text(), ephemeral=True)
+
+
+@time_group.command(
     name="today",
-    description="今日の勉強時間を表示"
+    description="今日の勉強時間と連続学習日数を表示"
 )
 async def today(ctx):
     total_seconds = get_today_total(
@@ -2866,11 +3070,12 @@ async def today(ctx):
 
     await ctx.send(
         "📚 **今日の勉強時間**\n"
-        f"{format_duration(total_seconds)}"
+        f"{format_duration(total_seconds)}\n"
+        f"🔥 連続学習：**{get_study_streak_safe(ctx.author.id)}日**"
     )
 
 
-@bot.hybrid_command(
+@time_group.command(
     name="week",
     description="今週の勉強時間を曜日別に表示"
 )
@@ -2986,6 +3191,7 @@ def _data_home_text(user_id):
         f"{format_duration(overview['sessions']['seconds'])}",
         f"復習問題：{overview['mistakes']['total']}件 "
         f"（未完了{overview['mistakes']['open_count'] or 0}件）",
+        f"SG単語帳の自己評価：{overview['glossary_ratings']['total']}語",
         f"週次計画：{overview['plans']['total']}件 "
         f"（有効{overview['plans']['active_count'] or 0}件）",
     ]
@@ -3417,9 +3623,571 @@ async def data_command(interaction: discord.Interaction):
     )
 
 
-@bot.hybrid_command(
-    name="sglog",
-    description="SG過去問道場の学習結果を入力"
+def _safe_glossary_text(value):
+    return discord.utils.escape_markdown(
+        discord.utils.escape_mentions(value)
+    )
+
+
+def _sg_glossary_rating_label(rating):
+    return "要復習" if rating == "まだ要復習" else rating
+
+
+def _sg_glossary_list_pages(entries):
+    """Return bounded message bodies and their first entry positions."""
+    pages = []
+    sections = []
+    size = 0
+    first_entry = 0
+    # Leave room for the heading, a search query, and the source URL.
+    body_limit = 1300
+
+    for index, entry in enumerate(entries):
+        title = f"**{_safe_glossary_text(entry.term)}**"
+        category = " / ".join(filter(None, (entry.category, entry.subcategory)))
+        if category:
+            title += f" · {_safe_glossary_text(category)}"
+        meaning = (
+            _safe_glossary_text(entry.meaning)
+            if entry.meaning else "意味未登録"
+        )
+        block = f"{title}\n{meaning}"
+        for part in split_text(block, body_limit):
+            added = len(part) + (2 if sections else 0)
+            if sections and size + added > body_limit:
+                pages.append(("\n\n".join(sections), first_entry))
+                sections = []
+                size = 0
+            if not sections:
+                first_entry = index
+            sections.append(part)
+            size += len(part) + (2 if len(sections) > 1 else 0)
+
+    if sections:
+        pages.append(("\n\n".join(sections), first_entry))
+    return pages
+
+
+def _sg_glossary_source_url(entry):
+    url = entry.source_url or SOURCE_GLOSSARY_URL
+    try:
+        parsed = urlsplit(url)
+    except ValueError:
+        return SOURCE_GLOSSARY_URL
+    if (
+        parsed.scheme not in ("http", "https")
+        or not parsed.netloc
+        or len(url) > 350
+        or any(character.isspace() or character in "<>" for character in url)
+    ):
+        return SOURCE_GLOSSARY_URL
+    return url
+
+
+def _sg_glossary_session_summary_text(summary, category, query):
+    started_at = datetime.fromisoformat(summary["started_at"]).astimezone(JST)
+    category_name = "全分野" if category == "all" else _safe_glossary_text(category)
+    query_note = (
+        f" / 検索: {_safe_glossary_text(query[:100])}"
+        if query and query.strip() else ""
+    )
+    counts = summary["counts"]
+    return (
+        "**SG単語帳の学習記録**\n"
+        f"学習者: <@{summary['user_id']}>\n"
+        f"開始: {started_at:%Y-%m-%d %H:%M}\n"
+        f"分野: {category_name}{query_note}\n"
+        f"合計 **{summary['total']}問**\n"
+        f"できた: {counts['できた']}問 / "
+        f"できなかった: {counts['できなかった']}問 / "
+        f"要復習: {counts['まだ要復習']}問 / "
+        f"微妙: {counts['微妙']}問"
+    )
+
+
+class SGGlossaryView(discord.ui.View):
+    def __init__(
+        self, owner_id, entries, mode="list", category="all", query=None,
+        ratings=None, record_channel=None, guild_id=None,
+        history_db_path=GLOSSARY_HISTORY_PATH,
+    ):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.all_entries = tuple(entries)
+        self.entries = self.all_entries
+        self.mode = mode
+        self.category = category
+        self.query = query or ""
+        self.list_pages = _sg_glossary_list_pages(self.entries)
+        self.page_index = 0
+        self.card_index = 0
+        self.meaning_page = 0
+        self.revealed = False
+        self.ratings = dict(ratings or {})
+        self.rating_filter = ()
+        self.last_rating_feedback = ""
+        self.record_channel = record_channel
+        self.guild_id = guild_id
+        self.history_db_path = history_db_path
+        self.session_id = uuid4().hex
+        self.summary_message = None
+        self._update_buttons()
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この用語集画面はコマンドを実行した本人専用です。",
+            ephemeral=True,
+        )
+        return False
+
+    def _meaning_parts(self):
+        entry = self.entries[self.card_index]
+        meaning = (
+            _safe_glossary_text(entry.meaning)
+            if entry.meaning else "意味は未登録です。"
+        )
+        return split_text(meaning, 1300)
+
+    def _update_buttons(self):
+        rating_buttons = (
+            self.rated_yes, self.rated_no,
+            self.rated_review, self.rated_unsure,
+        )
+        for rating_button in rating_buttons:
+            if self.mode == "cards":
+                if rating_button not in self.children:
+                    self.add_item(rating_button)
+                rating_button.disabled = not self.revealed
+            elif rating_button in self.children:
+                self.remove_item(rating_button)
+
+        if self.mode == "cards":
+            if self.rating_filter_select not in self.children:
+                self.add_item(self.rating_filter_select)
+        elif self.rating_filter_select in self.children:
+            self.remove_item(self.rating_filter_select)
+        for option in self.rating_filter_select.options:
+            option.default = option.value in self.rating_filter
+        if self.rating_filter:
+            if self.clear_rating_filter not in self.children:
+                self.add_item(self.clear_rating_filter)
+        elif self.clear_rating_filter in self.children:
+            self.remove_item(self.clear_rating_filter)
+
+        if self.mode == "list":
+            self.previous.disabled = self.page_index == 0
+            self.next_page.disabled = self.page_index >= len(self.list_pages) - 1
+            self.reveal.disabled = True
+            self.reveal.label = "意味を見る"
+            self.shuffle.disabled = True
+            self.switch_mode.label = "単語帳へ"
+        else:
+            parts = self._meaning_parts()
+            self.previous.disabled = (
+                self.card_index == 0
+                and (not self.revealed or self.meaning_page == 0)
+            )
+            self.next_page.disabled = (
+                self.card_index >= len(self.entries) - 1
+                and (not self.revealed or self.meaning_page >= len(parts) - 1)
+            )
+            self.reveal.disabled = False
+            self.reveal.label = "意味を隠す" if self.revealed else "意味を見る"
+            self.shuffle.disabled = len(self.entries) < 2
+            self.switch_mode.label = "一覧へ"
+
+    def content(self):
+        count = len(self.entries)
+        category_name = (
+            "全分野" if self.category == "all"
+            else _safe_glossary_text(self.category)
+        )
+        query_note = (
+            f" / 検索: {_safe_glossary_text(self.query[:100])}"
+            if self.query.strip() else ""
+        )
+        filter_note = (
+            " / 評価（選択時）: " + "・".join(
+                _sg_glossary_rating_label(rating)
+                for rating in self.rating_filter
+            )
+            if self.rating_filter else ""
+        )
+        if self.mode == "list":
+            body, _ = self.list_pages[self.page_index]
+            sources = {_sg_glossary_source_url(entry) for entry in self.entries}
+            source_label = (
+                "用語出典" if all(entry.source_url for entry in self.entries)
+                else "参考サイト"
+            )
+            source_note = (
+                f"\n\n{source_label}: <{next(iter(sources))}>"
+                if len(sources) == 1 else "\n\n用語出典は各カードに表示"
+            )
+            return (
+                f"**SG用語集・一覧**（分野: {category_name}{query_note}"
+                f"{filter_note} / {count}件） "
+                f"{self.page_index + 1}/{len(self.list_pages)}ページ\n\n"
+                f"{body}{source_note}"
+            )
+
+        entry = self.entries[self.card_index]
+        category = " / ".join(filter(None, (entry.category, entry.subcategory)))
+        category_label = _safe_glossary_text(category) if category else "未登録"
+        category_quote = "\n".join(
+            f"> {line}" for line in category_label.splitlines()
+        )
+        heading = (
+            f"**SG単語帳**（対象: {category_name}{query_note}{filter_note} / "
+            f"{self.card_index + 1}/{count}件）\n\n"
+            f"**{_safe_glossary_text(entry.term)}**\n"
+            f"{category_quote}"
+        )
+        feedback = (
+            f"\n{self.last_rating_feedback}"
+            if self.last_rating_feedback else ""
+        )
+        if not self.revealed:
+            return f"{heading}{feedback}\n\n「意味を見る」を押してください。"
+
+        parts = self._meaning_parts()
+        continuation = (
+            f"（意味 {self.meaning_page + 1}/{len(parts)}）\n"
+            if len(parts) > 1 else ""
+        )
+        source = _sg_glossary_source_url(entry)
+        source_label = "用語出典" if entry.source_url else "参考サイト"
+        current_rating = self.ratings.get(glossary_entry_key(entry))
+        rating_note = (
+            f"\n自己評価: {_sg_glossary_rating_label(current_rating)}"
+            if current_rating else "\n自己評価: 未評価"
+        )
+        return (
+            f"{heading}{feedback}\n\n{continuation}{parts[self.meaning_page]}\n\n"
+            f"{source_label}: <{source}>{rating_note}"
+        )
+
+    async def _refresh(self, interaction):
+        self._update_buttons()
+        await interaction.response.edit_message(
+            content=self.content(), view=self,
+        )
+
+    async def _apply_rating_filter(self, interaction, selected_ratings):
+        selected = set(selected_ratings)
+        if not selected.issubset(SG_GLOSSARY_RATINGS):
+            await interaction.response.send_message(
+                "自己評価は表示された4つから選んでください。",
+                ephemeral=True,
+            )
+            return
+        entries = (
+            tuple(entry for entry in self.all_entries
+                  if self.ratings.get(glossary_entry_key(entry)) in selected)
+            if selected else self.all_entries
+        )
+        if not entries:
+            await interaction.response.send_message(
+                "選んだ自己評価に該当する単語はありません。別の評価を選んでください。",
+                ephemeral=True,
+            )
+            return
+        self.rating_filter = tuple(
+            rating for rating in SG_GLOSSARY_RATINGS if rating in selected
+        )
+        self.entries = entries
+        self.list_pages = _sg_glossary_list_pages(entries)
+        self.page_index = 0
+        self.card_index = 0
+        self.meaning_page = 0
+        self.revealed = False
+        self.last_rating_feedback = ""
+        await self._refresh(interaction)
+
+    @discord.ui.select(
+        placeholder="自己評価で絞る（複数選択可）",
+        min_values=1, max_values=4, row=2,
+        options=[
+            discord.SelectOption(label="できた", value="できた"),
+            discord.SelectOption(label="できなかった", value="できなかった"),
+            discord.SelectOption(label="要復習", value="まだ要復習"),
+            discord.SelectOption(label="微妙", value="微妙"),
+        ],
+    )
+    async def rating_filter_select(self, interaction, select):
+        await self._apply_rating_filter(interaction, select.values)
+
+    @discord.ui.button(label="絞り込み解除", style=discord.ButtonStyle.secondary, row=3)
+    async def clear_rating_filter(self, interaction, button):
+        await self._apply_rating_filter(interaction, ())
+
+    @discord.ui.button(label="前へ", style=discord.ButtonStyle.secondary)
+    async def previous(self, interaction, button):
+        self.last_rating_feedback = ""
+        if self.mode == "list":
+            self.page_index -= 1
+        elif self.revealed and self.meaning_page > 0:
+            self.meaning_page -= 1
+        else:
+            self.card_index -= 1
+            self.meaning_page = 0
+            self.revealed = False
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="意味を見る", style=discord.ButtonStyle.primary)
+    async def reveal(self, interaction, button):
+        self.last_rating_feedback = ""
+        self.revealed = not self.revealed
+        self.meaning_page = 0
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="次へ", style=discord.ButtonStyle.secondary)
+    async def next_page(self, interaction, button):
+        self.last_rating_feedback = ""
+        if self.mode == "list":
+            self.page_index += 1
+        elif self.revealed and self.meaning_page < len(self._meaning_parts()) - 1:
+            self.meaning_page += 1
+        else:
+            self.card_index += 1
+            self.meaning_page = 0
+            self.revealed = False
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="シャッフル", style=discord.ButtonStyle.secondary)
+    async def shuffle(self, interaction, button):
+        self.last_rating_feedback = ""
+        # Pick a different word so a tap always changes the card.
+        target = random.randrange(len(self.entries) - 1)
+        if target >= self.card_index:
+            target += 1
+        self.card_index = target
+        self.meaning_page = 0
+        self.revealed = False
+        await self._refresh(interaction)
+
+    @discord.ui.button(label="単語帳へ", style=discord.ButtonStyle.success)
+    async def switch_mode(self, interaction, button):
+        self.last_rating_feedback = ""
+        if self.mode == "list":
+            self.card_index = self.list_pages[self.page_index][1]
+            self.mode = "cards"
+        else:
+            exact_pages = [
+                index for index, (_, first_entry) in enumerate(self.list_pages)
+                if first_entry == self.card_index
+            ]
+            if exact_pages:
+                self.page_index = exact_pages[0]
+            else:
+                self.page_index = max(
+                    index for index, (_, first_entry) in enumerate(self.list_pages)
+                    if first_entry < self.card_index
+                )
+            self.mode = "list"
+        self.meaning_page = 0
+        self.revealed = False
+        await self._refresh(interaction)
+
+    async def _rate(self, interaction, rating):
+        if self.mode != "cards" or not self.revealed:
+            await interaction.response.send_message(
+                "意味を表示してから自己評価を選んでください。",
+                ephemeral=True,
+            )
+            return
+        entry = self.entries[self.card_index]
+        try:
+            save_sg_glossary_rating(DB_PATH, self.owner_id, entry, rating)
+        except (OSError, sqlite3.Error) as error:
+            await interaction.response.send_message(
+                f"自己評価を保存できませんでした: {error}",
+                ephemeral=True,
+            )
+            return
+        summary = None
+        if self.record_channel is not None:
+            try:
+                summary = record_glossary_card(
+                    self.history_db_path, self.session_id,
+                    self.guild_id, self.record_channel.id,
+                    self.owner_id, entry, rating,
+                )
+            except (OSError, sqlite3.Error, ValueError) as error:
+                self.ratings[glossary_entry_key(entry)] = rating
+                await interaction.response.send_message(
+                    f"自己評価は保存しましたが、単語帳の学習記録を保存できませんでした: {error}"
+                    " もう一度評価を選んでください。",
+                    ephemeral=True,
+                )
+                return
+        self.ratings[glossary_entry_key(entry)] = rating
+        self.last_rating_feedback = (
+            f"自己評価「{_sg_glossary_rating_label(rating)}」を記録しました。"
+        )
+        if self.card_index < len(self.entries) - 1:
+            self.card_index += 1
+            self.revealed = False
+            self.meaning_page = 0
+        await self._refresh(interaction)
+        if summary is not None:
+            try:
+                await self._publish_session_summary(summary)
+            except (discord.HTTPException, OSError, sqlite3.Error) as error:
+                await interaction.followup.send(
+                    "学習記録は専用DBに保存しましたが、チャンネルへの投稿に"
+                    f"失敗しました: {error} 次の評価時に再試行します。",
+                    ephemeral=True,
+                )
+
+    async def _publish_session_summary(self, summary):
+        text = _sg_glossary_session_summary_text(
+            summary, self.category, self.query,
+        )
+        message_id = summary["summary_message_id"]
+        if self.summary_message is None and message_id is not None:
+            try:
+                self.summary_message = await self.record_channel.fetch_message(
+                    message_id,
+                )
+            except discord.NotFound:
+                pass
+        allowed_mentions = discord.AllowedMentions.none()
+        if self.summary_message is None:
+            self.summary_message = await self.record_channel.send(
+                text, allowed_mentions=allowed_mentions,
+            )
+        else:
+            try:
+                await self.summary_message.edit(
+                    content=text, allowed_mentions=allowed_mentions,
+                )
+            except discord.NotFound:
+                self.summary_message = await self.record_channel.send(
+                    text, allowed_mentions=allowed_mentions,
+                )
+        if message_id != self.summary_message.id:
+            set_glossary_summary_message_id(
+                self.history_db_path, self.session_id,
+                self.summary_message.id,
+            )
+
+    @discord.ui.button(label="できた", style=discord.ButtonStyle.success, row=1)
+    async def rated_yes(self, interaction, button):
+        await self._rate(interaction, "できた")
+
+    @discord.ui.button(label="できなかった", style=discord.ButtonStyle.danger, row=1)
+    async def rated_no(self, interaction, button):
+        await self._rate(interaction, "できなかった")
+
+    @discord.ui.button(label="要復習", style=discord.ButtonStyle.primary, row=1)
+    async def rated_review(self, interaction, button):
+        await self._rate(interaction, "まだ要復習")
+
+    @discord.ui.button(label="微妙", style=discord.ButtonStyle.secondary, row=1)
+    async def rated_unsure(self, interaction, button):
+        await self._rate(interaction, "微妙")
+
+
+@sg_group.command(
+    name="glossary",
+    description="SG用語集を一覧または単語帳で見る"
+)
+@app_commands.describe(
+    mode="表示方法",
+    category="表示する分野",
+    query="用語・意味・分野・小分類を検索",
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="一覧", value="list"),
+        app_commands.Choice(name="単語帳", value="cards"),
+    ],
+    category=[
+        app_commands.Choice(name="全分野", value="all"),
+        *(
+            app_commands.Choice(name=name, value=name)
+            for name in SG_GLOSSARY_CATEGORIES
+        ),
+    ],
+)
+async def sgglossary(
+    ctx, mode: str = "list", category: str = "all", query: str | None = None,
+):
+    is_interaction = getattr(ctx, "interaction", None) is not None
+
+    async def reply(message, view=None):
+        kwargs = {"view": view} if view is not None else {}
+        if is_interaction:
+            kwargs["ephemeral"] = True
+        await ctx.send(message, **kwargs)
+
+    if (
+        ctx.guild is None
+        or getattr(ctx.channel, "name", "").casefold()
+        != SG_GLOSSARY_CHANNEL_NAME.casefold()
+    ):
+        await reply(f"このコマンドは #{SG_GLOSSARY_CHANNEL_NAME} で使ってください。")
+        return
+
+    normalized_mode = {"一覧": "list", "単語帳": "cards"}.get(mode, mode)
+    if normalized_mode not in ("list", "cards"):
+        await reply("表示方法は「一覧」または「単語帳」を選んでください。")
+        return
+    if category != "all" and category not in SG_GLOSSARY_CATEGORIES:
+        await reply("分野は候補から選んでください。")
+        return
+    if query and len(query) > 100:
+        await reply("検索語は100文字以内で入力してください。")
+        return
+
+    try:
+        all_entries = load_glossary(GLOSSARY_PATH)
+    except FileNotFoundError:
+        await reply(
+            "SG用語データがありません。`data/sg_glossary.json` を配置してください。\n"
+            f"参照先: <{SOURCE_GLOSSARY_URL}>"
+        )
+        return
+    except (OSError, GlossaryDataError) as error:
+        await reply(f"SG用語データを読み込めません: {error}")
+        return
+
+    if not all_entries:
+        await reply("SG用語データは空です。`data/sg_glossary.json` に用語を追加してください。")
+        return
+    entries = (
+        all_entries if category == "all"
+        else [entry for entry in all_entries if entry.category == category]
+    )
+    if not entries:
+        await reply("選んだ分野の用語がありません。別の分野を選んでください。")
+        return
+
+    entries = search_glossary(entries, query)
+    if not entries:
+        await reply("一致する用語がありません。分野や検索語を変えて試してください。")
+        return
+
+    try:
+        ratings = get_sg_glossary_ratings(DB_PATH, ctx.author.id, entries)
+    except (OSError, sqlite3.Error) as error:
+        await reply(f"自己評価を読み込めません: {error}")
+        return
+    view = SGGlossaryView(
+        ctx.author.id, entries, normalized_mode, category, query,
+        ratings=ratings, record_channel=ctx.channel,
+        guild_id=ctx.guild.id,
+        history_db_path=GLOSSARY_HISTORY_PATH,
+    )
+    await reply(view.content(), view=view)
+
+
+@sg_group.command(
+    name="log",
+    description="SG過去問道場の結果を記録（分野・問題数・正答率）"
 )
 async def sglog(ctx):
     is_interaction = getattr(ctx, "interaction", None) is not None
@@ -3470,9 +4238,9 @@ async def sglog(ctx):
         await ctx.send(message, view=view)
 
 
-@bot.hybrid_command(
-    name="mistake",
-    description="SGで間違えた問題を復習リストへ登録"
+@review_group.command(
+    name="add",
+    description="間違えた問題を復習リストへ登録"
 )
 async def mistake(ctx):
     view = SGMistakeView(ctx.author.id)
@@ -3483,9 +4251,9 @@ async def mistake(ctx):
         await ctx.send(message, view=view)
 
 
-@bot.hybrid_command(
-    name="reviews",
-    description="SGの復習予定を表示"
+@review_group.command(
+    name="list",
+    description="今日までの復習予定を表示"
 )
 @app_commands.describe(all_items="今日以降の予定も表示する")
 async def reviews(ctx, all_items: bool = False):
@@ -3498,7 +4266,7 @@ async def reviews(ctx, all_items: bool = False):
             "未完了の復習はありません。"
             if all_items else
             "今日までに復習する問題はありません。"
-            " `/reviews all_items:true` で今後の予定を見られます。"
+            " `/review list all_items:true` で今後の予定を見られます。"
         )
         await ctx.send(message)
         return
@@ -3526,13 +4294,13 @@ async def reviews(ctx, all_items: bool = False):
         )
     if len(items) > 10:
         lines.append(f"ほか{len(items) - 10}件")
-    lines.append("再挑戦後は `/review` で結果を登録。")
+    lines.append("再挑戦後は `/review answer` で結果を登録。")
     await ctx.send("\n\n".join(lines)[:1900])
 
 
-@bot.hybrid_command(
-    name="review",
-    description="SG誤答の再挑戦結果を登録"
+@review_group.command(
+    name="answer",
+    description="復習で解き直した結果（正解・不正解）を登録"
 )
 @app_commands.describe(
     mistake_id="復習リストに表示されるID",
@@ -3564,8 +4332,8 @@ async def review(ctx, mistake_id: int, result: str):
         )
 
 
-@bot.hybrid_command(
-    name="sgprogress",
+@sg_group.command(
+    name="progress",
     description="SGの14分野と科目Bの進捗を表示"
 )
 async def sgprogress(ctx):
@@ -3621,8 +4389,8 @@ async def sgprogress(ctx):
     await ctx.send("\n".join(lines)[:1900])
 
 
-@bot.hybrid_command(
-    name="sgb",
+@sg_group.command(
+    name="b",
     description="SG科目Bの演習結果を記録"
 )
 async def sgb(ctx):
@@ -3644,7 +4412,7 @@ async def sgb(ctx):
         await ctx.send(message, view=view)
 
 
-@bot.hybrid_command(
+@time_group.command(
     name="logs",
     description="今日の勉強ログを表示"
 )
@@ -3679,7 +4447,7 @@ async def logs(ctx):
 
 
 
-@bot.hybrid_command(
+@plan_group.command(
     name="roadmap",
     description="資格取得ロードマップを表示"
 )
@@ -3739,6 +4507,12 @@ async def roadmap(ctx):
             "設定されていません。"
         )
 
+    countdown = get_exam_countdown_line(ctx.author.id)
+    if countdown:
+        footer += f"\n📆 {countdown}"
+    elif current_name:
+        footer += "\n📆 試験日は `/plan exam` で設定できます。"
+
     await ctx.send(
         "🗺️ **資格取得ロードマップ**\n\n"
         f"{roadmap_text}"
@@ -3746,7 +4520,7 @@ async def roadmap(ctx):
     )
 
 
-@bot.hybrid_command(
+@sg_group.command(
     name="status",
     description="SGの累積学習状況を表示"
 )
@@ -3839,7 +4613,7 @@ async def status(ctx):
     )
 
 
-@bot.hybrid_command(
+@ai_group.command(
     name="next",
     description="次回の勉強メニューをAIが提案"
 )
@@ -3968,19 +4742,42 @@ async def next_study(ctx):
             )
 
 
-@bot.hybrid_command(
-    name="plan",
+@plan_group.command(
+    name="new",
     description="SG合格までの週次学習計画を作成"
 )
 @app_commands.describe(
-    weeks="試験までの残り週数（1〜16週）",
+    weeks="試験までの残り週数（1〜16週）。省略すると/plan examの試験日から計算",
     weekly_questions="1週間の目標問題数（省略時30問）",
 )
-async def plan(ctx, weeks: int, weekly_questions: int = 30):
+async def plan(
+    ctx, weeks: int | None = None, weekly_questions: int = 30
+):
+    today_date = datetime.now(JST).date()
+    exam_on = get_current_exam_target(ctx.author.id)["exam_on"]
+    if exam_on is not None and exam_on < today_date:
+        exam_on = None
+
+    plan_note = ""
+    if weeks is None:
+        if exam_on is None:
+            await ctx.send(
+                "試験日が未設定です。`/plan exam` で試験日を選ぶか、"
+                "`/plan new weeks:6` のように残り週数を指定してください。"
+            )
+            return
+        weeks = weeks_until(exam_on, today_date)
+        if weeks > 16:
+            plan_note = (
+                f"試験日まで{weeks}週ありますが、"
+                "計画は直近16週分で作ります。\n"
+            )
+            weeks = 16
+
     if not 1 <= weeks <= 16:
         await ctx.send(
             "⚠️ 残り週数は1〜16週で指定してください。\n"
-            "例：`/plan weeks:6` または `!plan 6`"
+            "例：`/plan new weeks:6` または `!plan new 6`"
         )
         return
 
@@ -4035,9 +4832,20 @@ async def plan(ctx, weeks: int, weekly_questions: int = 30):
         else "現在はなし"
     )
 
+    exam_text = (
+        f"\n【試験日】{format_japanese_date(exam_on)}"
+        f"（あと{(exam_on - today_date).days}日）\n"
+        if exam_on is not None
+        else ""
+    )
+    schedule_text = format_plan_schedule(today_date, weeks, exam_on)
+
     prompt = f"""
 情報セキュリティマネジメント（SG）を
 残り{weeks}週間で合格するための学習計画を作成してください。
+{exam_text}
+【各週の期間（Botが計算済み）】
+{schedule_text}
 
 【学習方法】
 情報セキュリティマネジメント過去問道場を中心に学習する。
@@ -4057,6 +4865,7 @@ async def plan(ctx, weeks: int, weekly_questions: int = 30):
 
 ルール:
 - 第1週から第{weeks}週まで、各週を必ず分ける
+- 週の見出しは「第1週」のように番号だけにし、日付や曜日は書かない
 - 各週に「基本目標{weekly_questions}問」「学習内容」「確認ポイント」を書く
 - 翌週の上乗せは実績確定後にBotが計算するので、将来の実績を推測しない
 - 過去問道場で実行できる具体的な内容にする
@@ -4089,21 +4898,28 @@ async def plan(ctx, weeks: int, weekly_questions: int = 30):
 
     async with ctx.typing():
         try:
-            answer = await ask_ollama(prompt)
+            answer = strip_week_heading_dates(await ask_ollama(prompt))
 
             update_sg_plan_text(DB_PATH, plan_id, answer)
 
             await ctx.send(
-                f"🗓️ **SG合格まで{weeks}週間の計画**\n\n"
+                f"🗓️ **SG合格まで{weeks}週間の計画**\n"
+                + (
+                    format_exam_countdown(exam_on, today_date, "SG試験")
+                    + "\n"
+                    if exam_on is not None else ""
+                )
+                + f"{plan_note}\n"
+                f"**各週の期間**\n{schedule_text}\n\n"
                 f"基本目標：毎週{weekly_questions}問。"
-                "達成状況は `/plan_status` で確認できます。\n\n"
+                "達成状況は `/plan status` で確認できます。\n\n"
                 f"{answer}"
             )
 
         except aiohttp.ClientConnectorError:
             await ctx.send(
                 f"毎週{weekly_questions}問の数値目標を保存しました。"
-                "`/plan_status` で達成状況を確認できます。\n"
+                "`/plan status` で達成状況を確認できます。\n"
                 "Ollamaに接続できなかったため、文章の計画は未生成です。"
             )
 
@@ -4112,14 +4928,14 @@ async def plan(ctx, weeks: int, weekly_questions: int = 30):
 
             await ctx.send(
                 f"毎週{weekly_questions}問の数値目標を保存しました。"
-                "`/plan_status` で達成状況を確認できます。\n"
+                "`/plan status` で達成状況を確認できます。\n"
                 "文章の計画は作成できませんでした。"
             )
 
 
-@bot.hybrid_command(
-    name="plan_status",
-    description="SG週次計画の目標と実績を確認"
+@plan_group.command(
+    name="status",
+    description="週次計画の目標と実績を確認"
 )
 async def plan_status(ctx):
     status_data = get_sg_plan_status(
@@ -4128,7 +4944,7 @@ async def plan_status(ctx):
     if status_data is None:
         await ctx.send(
             "保存済みのSG計画がありません。"
-            "`/plan weeks:6 weekly_questions:30` で作成できます。"
+            "`/plan new weeks:6 weekly_questions:30` で作成できます。"
         )
         return
 
@@ -4138,6 +4954,9 @@ async def plan_status(ctx):
         f"{status_data['weeks']}週間 / "
         f"基本目標：{status_data['weekly_questions']}問/週",
     ]
+    countdown = get_exam_countdown_line(ctx.author.id)
+    if countdown:
+        lines.append(countdown)
     for week in status_data["rows"]:
         label = (
             "進行中" if week["week"] == status_data["current_week"]
@@ -4163,7 +4982,261 @@ async def plan_status(ctx):
     await ctx.send("\n".join(lines)[:1900])
 
 
-@bot.hybrid_command(
+# ============================================================
+# 試験日設定（/plan exam）
+# ============================================================
+
+class ExamDatePartSelect(discord.ui.Select):
+    def __init__(self, part, choices, placeholder, selected, row,
+                 disabled=False):
+        options = [
+            discord.SelectOption(
+                label=label,
+                value=str(value),
+                default=value == selected,
+            )
+            for label, value in choices
+        ] or [discord.SelectOption(label="—", value="0")]
+        super().__init__(
+            placeholder=placeholder,
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=row,
+            disabled=disabled or not choices,
+        )
+        self.part = part
+
+    async def callback(self, interaction):
+        await self.view.select_part(
+            interaction, self.part, int(self.values[0])
+        )
+
+
+class ExamDateView(discord.ui.View):
+    def __init__(self, owner_id, target, today):
+        super().__init__(timeout=300)
+        self.owner_id = owner_id
+        self.target = target
+        self.today = today
+        current = target["exam_on"]
+        if current is not None and current >= today:
+            self.year, self.month, self.day = (
+                current.year, current.month, current.day
+            )
+        else:
+            self.year = self.month = self.day = None
+        self._build()
+
+    async def interaction_check(self, interaction):
+        if interaction.user.id == self.owner_id:
+            return True
+        await interaction.response.send_message(
+            "この設定画面は実行した本人専用です。", ephemeral=True
+        )
+        return False
+
+    def _valid_months(self):
+        if self.year is None:
+            return []
+        first = self.today.month if self.year == self.today.year else 1
+        return list(range(first, 13))
+
+    def _valid_days(self):
+        if self.year is None or self.month is None:
+            return []
+        first = (
+            self.today.day
+            if (self.year, self.month)
+            == (self.today.year, self.today.month)
+            else 1
+        )
+        return list(
+            range(first, days_in_month(self.year, self.month) + 1)
+        )
+
+    def selected_date(self):
+        if None in (self.year, self.month, self.day):
+            return None
+        try:
+            return build_exam_date(
+                self.year, self.month, self.day, self.today
+            )
+        except ValueError:
+            return None
+
+    def _build(self):
+        # 年や月を変えて存在しなくなった選択は外す
+        if self.month not in self._valid_months():
+            self.month = None
+        if self.day not in self._valid_days():
+            self.day = None
+
+        self.clear_items()
+        self.add_item(ExamDatePartSelect(
+            "year",
+            [(f"{year}年", year) for year in exam_year_choices(self.today)],
+            "年を選択",
+            self.year,
+            row=0,
+        ))
+        self.add_item(ExamDatePartSelect(
+            "month",
+            [(f"{month}月", month) for month in self._valid_months()],
+            "月を選択" if self.year else "先に年を選択",
+            self.month,
+            row=1,
+            disabled=self.year is None,
+        ))
+
+        day_choices = [
+            (
+                f"{day}日（"
+                f"{WEEKDAY_LABELS[date(self.year, self.month, day).weekday()]}）",
+                day,
+            )
+            for day in self._valid_days()
+        ]
+        if not day_choices:
+            self.add_item(ExamDatePartSelect(
+                "day", [], "先に年と月を選択", None, row=2, disabled=True,
+            ))
+        elif len(day_choices) <= 25:
+            self.add_item(ExamDatePartSelect(
+                "day", day_choices, "日を選択", self.day, row=2,
+            ))
+        else:
+            # Discordのセレクトは25件までなので前半・後半に分ける
+            for row, chunk in (
+                (2, day_choices[:16]), (3, day_choices[16:])
+            ):
+                self.add_item(ExamDatePartSelect(
+                    "day",
+                    chunk,
+                    f"日を選択（{chunk[0][1]}〜{chunk[-1][1]}日）",
+                    self.day,
+                    row=row,
+                ))
+
+        save_button = discord.ui.Button(
+            label="この日で保存",
+            style=discord.ButtonStyle.success,
+            disabled=self.selected_date() is None,
+            row=4,
+        )
+        save_button.callback = self.save
+        self.add_item(save_button)
+
+        if self.target["exam_on"] is not None:
+            delete_button = discord.ui.Button(
+                label="試験日を削除",
+                style=discord.ButtonStyle.danger,
+                row=4,
+            )
+            delete_button.callback = self.delete
+            self.add_item(delete_button)
+
+        close_button = discord.ui.Button(
+            label="閉じる",
+            style=discord.ButtonStyle.secondary,
+            row=4,
+        )
+        close_button.callback = self.close
+        self.add_item(close_button)
+
+    def content(self):
+        current = self.target["exam_on"]
+        lines = [f"**{self.target['display_name']} の試験日**"]
+        lines.append(
+            "現在の設定："
+            + (
+                format_exam_countdown(current, self.today)
+                if current is not None else "未設定"
+            )
+        )
+
+        year_text = f"{self.year}年" if self.year else "□年"
+        month_text = f"{self.month}月" if self.month else "□月"
+        day_text = f"{self.day}日" if self.day else "□日"
+        lines.append(f"\n選択中：**{year_text}{month_text}{day_text}**")
+
+        selected = self.selected_date()
+        if selected is not None:
+            lines.append(
+                "保存すると：" + format_exam_countdown(selected, self.today)
+            )
+        else:
+            lines.append(
+                "年・月・日を順に選んで「この日で保存」を押してください。"
+            )
+        return "\n".join(lines)
+
+    async def select_part(self, interaction, part, value):
+        setattr(self, part, value)
+        self._build()
+        await interaction.response.edit_message(
+            content=self.content(), view=self
+        )
+
+    async def save(self, interaction):
+        selected = self.selected_date()
+        if selected is None:
+            await interaction.response.send_message(
+                "年・月・日をすべて選んでください。", ephemeral=True
+            )
+            return
+
+        save_exam_date(
+            DB_PATH,
+            self.owner_id,
+            self.target["qualification"],
+            selected,
+            datetime.now(JST).isoformat(),
+        )
+        self.stop()
+        await interaction.response.edit_message(
+            content=(
+                "試験日を保存しました。\n"
+                + format_exam_countdown(
+                    selected, self.today, self.target["label"]
+                )
+                + "\n`/plan new` で weeks を省略すると、"
+                "この日までの週数で計画を作ります。"
+            ),
+            view=None,
+        )
+
+    async def delete(self, interaction):
+        delete_exam_date(
+            DB_PATH, self.owner_id, self.target["qualification"]
+        )
+        self.stop()
+        await interaction.response.edit_message(
+            content=f"{self.target['label']}の試験日を削除しました。",
+            view=None,
+        )
+
+    async def close(self, interaction):
+        self.stop()
+        await interaction.response.edit_message(
+            content="試験日は変更していません。", view=None
+        )
+
+
+@plan_group.command(
+    name="exam",
+    description="試験日を年・月・日から選んで設定・確認"
+)
+async def exam_command(ctx):
+    view = ExamDateView(
+        ctx.author.id,
+        get_current_exam_target(ctx.author.id),
+        datetime.now(JST).date(),
+    )
+    await ctx.send(view.content(), view=view, ephemeral=True)
+
+
+@ai_group.command(
     name="report",
     description="今週のSG学習レポートをAIが作成"
 )
@@ -4389,8 +5462,8 @@ AIからの提案として3項目以内で提案する。
             )
 
 
-@bot.hybrid_command(
-    name="ai",
+@ai_group.command(
+    name="today",
     description="今日の学習状況をAIが分析"
 )
 async def ai(ctx):
@@ -4673,6 +5746,10 @@ async def on_voice_state_update(
             )
         )
 
+        streak = get_study_streak_safe(member.id)
+        countdown = get_exam_countdown_line(member.id)
+        countdown_text = f"📆 {countdown}\n" if countdown else ""
+
         await notification_channel.send(
             f"📚 **{member.mention} "
             "勉強おつかれさま！**\n\n"
@@ -4681,7 +5758,9 @@ async def on_voice_state_update(
             f"📅 今日：**"
             f"{format_duration(today_total_seconds)}**\n"
             f"📊 今週：**"
-            f"{format_duration(week_total_seconds)}**\n\n"
+            f"{format_duration(week_total_seconds)}**\n"
+            f"🔥 連続学習：**{streak}日**\n"
+            f"{countdown_text}\n"
             f"📝 今日やった内容をこの "
             f"**#{STUDY_LOG_CHANNEL_NAME}** "
             "に書いてね！\n"
@@ -4702,6 +5781,7 @@ def main():
         )
 
     init_db()
+    init_glossary_history_db(GLOSSARY_HISTORY_PATH)
     bot.run(TOKEN)
 
 

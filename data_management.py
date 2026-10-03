@@ -5,6 +5,7 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
+from sg_glossary import init_sg_glossary_rating_table
 from sg_features import (
     SG_B_TOPICS, parse_correct_count, score_from_counts, validate_question_ref,
 )
@@ -28,6 +29,7 @@ RESET_SCOPES = {
     "sessions": "完了済みの通話勉強時間",
     "mistakes": "誤答の復習リストと挑戦履歴",
     "plans": "週次計画の履歴",
+    "glossary_ratings": "SG単語帳の自己評価",
     "all": "自分の全学習データ（SG以外も含む）",
 }
 FIELDS = {
@@ -75,6 +77,7 @@ def _one(conn, query, params):
 
 def get_overview(db_path, user_id):
     with _connect(db_path) as conn:
+        init_sg_glossary_rating_table(conn.cursor())
         logs = _one(conn, """
             SELECT COUNT(*) AS total,
                    SUM(CASE WHEN a.qualification = 'SG' THEN 1 ELSE 0 END)
@@ -104,13 +107,22 @@ def get_overview(db_path, user_id):
                        AS active_count
             FROM sg_plans WHERE user_id = ?
         """, (user_id,))
+        glossary_ratings = _one(conn, """
+            SELECT COUNT(*) AS total,
+                   COALESCE(SUM(rating = 'できた'), 0) AS done,
+                   COALESCE(SUM(rating = 'できなかった'), 0) AS failed,
+                   COALESCE(SUM(rating = 'まだ要復習'), 0) AS needs_review,
+                   COALESCE(SUM(rating = '微妙'), 0) AS unsure
+            FROM sg_glossary_ratings WHERE user_id = ?
+        """, (user_id,))
         active = _one(conn, """
             SELECT COUNT(*) AS total FROM active_study_sessions
             WHERE user_id = ?
         """, (user_id,))["total"]
     return {
         "logs": logs, "sessions": sessions,
-        "mistakes": mistakes, "plans": plans, "active": active,
+        "mistakes": mistakes, "plans": plans,
+        "glossary_ratings": glossary_ratings, "active": active,
     }
 
 
@@ -414,6 +426,7 @@ def apply_edit(db_path, user_id, kind, record_id, field, value, expected_record)
 def _scope_ids(conn, user_id, scope):
     if scope not in RESET_SCOPES:
         raise ValueError("リセット対象が正しくありません。")
+    init_sg_glossary_rating_table(conn.cursor())
     result = {}
     queries = {
         "logs": "SELECT message_id FROM study_logs WHERE user_id = ?",
@@ -425,12 +438,20 @@ def _scope_ids(conn, user_id, scope):
         "sessions": "SELECT id FROM study_sessions WHERE user_id = ?",
         "mistakes": "SELECT id FROM sg_mistakes WHERE user_id = ?",
         "plans": "SELECT id FROM sg_plans WHERE user_id = ?",
+        "glossary_ratings": """
+            SELECT entry_key, rating FROM sg_glossary_ratings
+            WHERE user_id = ?
+        """,
     }
-    keys = ("logs", "sessions", "mistakes", "plans") if scope == "all" else (scope,)
+    keys = (
+        "logs", "sessions", "mistakes", "plans", "glossary_ratings"
+    ) if scope == "all" else (scope,)
     for key in keys:
         params = (user_id, user_id) if key == "sg_logs" else (user_id,)
+        rows = conn.execute(queries[key], params)
         result[key] = tuple(sorted(
-            row[0] for row in conn.execute(queries[key], params)
+            (row[0], row[1]) if key == "glossary_ratings" else row[0]
+            for row in rows
         ))
     return result
 
@@ -474,4 +495,9 @@ def reset_user_data(db_path, user_id, scope, expected_ids):
             conn.execute("DELETE FROM sg_mistakes WHERE user_id = ?", (user_id,))
         if scope in ("plans", "all"):
             conn.execute("DELETE FROM sg_plans WHERE user_id = ?", (user_id,))
+        if scope in ("glossary_ratings", "all"):
+            conn.execute(
+                "DELETE FROM sg_glossary_ratings WHERE user_id = ?",
+                (user_id,),
+            )
     return sum(len(ids) for ids in expected_ids.values())
