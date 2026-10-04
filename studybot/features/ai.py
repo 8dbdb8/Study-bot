@@ -1,6 +1,6 @@
 """/ai グループ：AIコーチによる分析と提案。"""
 
-from datetime import datetime
+from datetime import date, datetime
 
 import aiohttp
 import discord
@@ -23,7 +23,11 @@ from studybot.ai_check import checked_answer
 from studybot.groups import ai_group
 from studybot.habits import get_rest_days
 from studybot.scoring import predict_score, prediction_summary
-from studybot.sg_features import get_weak_categories
+from studybot.sg_features import (
+    format_reason_breakdown,
+    get_reason_breakdown,
+    get_weak_categories,
+)
 from studybot.qualifications import SG, current_qualification, get_qualification
 from studybot.replies import send_long
 from studybot.ollama import ask_ollama
@@ -231,10 +235,19 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
         user_id, qualification, report_status, week_rows,
         today or datetime.now(JST).date(),
     )
+    reason_breakdown = format_reason_breakdown(get_reason_breakdown(
+        config.DB_PATH, user_id,
+        date.fromisoformat(report_status["start_date"]),
+        date.fromisoformat(report_status["end_date"]),
+        qualification,
+    ))
+    if reason_breakdown:
+        facts_text += f"\n- 今週登録した誤答の理由：{reason_breakdown}"
 
     return {
         "facts_text": facts_text,
         "prediction_text": prediction_text,
+        "reason_text": reason_breakdown,
         "start_date": report_status["start_date"],
         "end_date": report_status["end_date"],
         "total_seconds": total_seconds,
@@ -331,6 +344,7 @@ def build_weekly_report_prompt(data):
 
 ### 今週の課題
 記録から判断できる改善候補を整理する。
+誤答の理由の内訳があれば、多い理由への対策を1つ入れる。
 根拠がなければ断定しない。
 
 ### 来週の方針
@@ -378,6 +392,10 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
     if data.get("prediction_text"):
         embed.add_field(
             name="予想得点（目安）", value=data["prediction_text"], inline=False
+        )
+    if data.get("reason_text"):
+        embed.add_field(
+            name="今週の間違え方", value=data["reason_text"], inline=False
         )
     return embed
 

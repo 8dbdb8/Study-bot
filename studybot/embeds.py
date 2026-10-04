@@ -67,7 +67,9 @@ def week_lines(rows, today):
 # 勉強時間
 # ------------------------------------------------------------
 
-def build_today_embed(total_seconds, streak, countdown=None, goal_text=None):
+def build_today_embed(total_seconds, streak, countdown=None, goal_text=None,
+                      checklist=None):
+    """checklist は (見出しの後ろに付ける文, 一覧の文) か None。"""
     embed = discord.Embed(
         title="今日の勉強時間",
         description=f"## {format_minutes(total_seconds)}",
@@ -76,6 +78,10 @@ def build_today_embed(total_seconds, streak, countdown=None, goal_text=None):
     embed.add_field(name="連続学習", value=f"🔥 {streak}日", inline=True)
     if goal_text:
         embed.add_field(name="今日の目標", value=goal_text, inline=False)
+    if checklist:
+        embed.add_field(
+            name=f"今日のメニュー {checklist[0]}", value=checklist[1], inline=False
+        )
     if countdown:
         embed.add_field(name="試験", value=countdown, inline=False)
     return embed
@@ -272,6 +278,15 @@ def mistake_label(item, current_code="SG"):
     return f"{qualification}・{item['category']}"
 
 
+def reason_text(item, limit):
+    """誤答の理由。種類を選んでいれば【読み違い】のように前に付ける。"""
+    kind = item.get("reason_kind")
+    reason = safe_text(item["reason"], limit) if item["reason"] else ""
+    if kind and reason:
+        return f"【{kind}】{reason}"
+    return f"【{kind}】" if kind else reason
+
+
 def _review_round(item):
     return f"連続正解 {item['success_streak']}/3"
 
@@ -285,7 +300,7 @@ def build_review_list_embed(items, all_items=False, current_code="SG"):
     for item in items[:10]:
         value = (
             f"{safe_text(item['question_ref'], 200)}\n"
-            f"理由：{safe_text(item['reason'], 80)}"
+            f"理由：{reason_text(item, 80)}"
         )
         if item["memo"]:
             value += f"\nメモ：{safe_text(item['memo'], 60)}"
@@ -309,7 +324,7 @@ def build_review_list_embed(items, all_items=False, current_code="SG"):
 
 def build_review_card_embed(item, position, total, current_code="SG"):
     description = f"{safe_text(item['question_ref'], 200)}\n\n"
-    description += f"**前回の誤答理由**\n{safe_text(item['reason'], 300)}"
+    description += f"**前回の誤答理由**\n{reason_text(item, 300)}"
     if item["memo"]:
         description += f"\n\n**メモ**\n{safe_text(item['memo'], 300)}"
     embed = discord.Embed(
@@ -385,7 +400,7 @@ def _final_stretch_fields(embed, final_stretch):
 def build_digest_embed(
     today, countdown, streak, due_items, plan_week=None, weak=(),
     threshold=60.0, final_stretch=None, current_code="SG",
-    extra_lines=(),
+    extra_lines=(), checklist_text=None,
 ):
     """今日伝えることがなければNoneを返す。
 
@@ -403,10 +418,11 @@ def build_digest_embed(
     )
     if exam_day:
         title = f"{date_text} 今日は{final_stretch['label']}です"
-        description = (
-            "がんばってください！受験票と本人確認書類を忘れずに。\n"
-            f"🔥 連続学習 {streak}日"
-        )
+        description = "\n".join((
+            "がんばってください！受験票と本人確認書類を忘れずに。",
+            *extra_lines,
+            f"🔥 連続学習 {streak}日",
+        ))
     else:
         title = f"{date_text}の学習メニュー"
         if final_stretch is not None:
@@ -473,5 +489,14 @@ def build_digest_embed(
             value=" ・ ".join(f"{category} {score:.0f}%" for category, score in weak),
             inline=False,
         )
-    embed.set_footer(text="通知は /plan notify でオフにできます")
+    if checklist_text:
+        embed.add_field(
+            name="今日のチェックリスト",
+            value=_clip(checklist_text),
+            inline=False,
+        )
+    embed.set_footer(
+        text="記録するとチェックが付きます ・ 通知は /plan notify でオフにできます"
+        if checklist_text else "通知は /plan notify でオフにできます"
+    )
     return embed

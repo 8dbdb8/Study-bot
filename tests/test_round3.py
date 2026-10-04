@@ -494,13 +494,16 @@ class FocusTimerTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         super().setUp()
         self.waits = []
+        self.clock = datetime(2026, 10, 15, 9, 0, tzinfo=config.JST)
 
         async def fake_sleep(seconds):
             self.waits.append(seconds)
+            self.clock += timedelta(seconds=seconds)
 
-        patcher = patch.object(focus_feature, "_sleep", fake_sleep)
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for name, value in (("_sleep", fake_sleep), ("_now", lambda: self.clock)):
+            patcher = patch.object(focus_feature, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.addCleanup(focus_feature.FOCUS_TIMERS.clear)
 
     async def test_runs_sets_and_records(self):
@@ -514,8 +517,7 @@ class FocusTimerTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertIn("1セット目おわり", texts[0])
         self.assertIn("2セット目スタート", texts[1])
         self.assertIn("2セット完了", texts[2])
-        today = datetime.now(config.JST).date()
-        self.assertEqual(get_focus_sets(self.db_path, 7, today), (2, 50))
+        self.assertEqual(get_focus_sets(self.db_path, 7, TODAY), (2, 50))
         self.assertNotIn(7, focus_feature.FOCUS_TIMERS)
 
     async def test_uses_focus_channel(self):

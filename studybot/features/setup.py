@@ -11,6 +11,7 @@ from studybot.channels import (
     set_channel_setting,
 )
 from studybot.embeds import COLOR_DEFAULT
+from studybot.features import health
 
 
 def build_setup_embed(guild):
@@ -35,6 +36,14 @@ def build_setup_embed(guild):
         else:
             value = f"{channel.mention}（名前「{default_name}」で自動検出）"
         embed.add_field(name=label, value=value, inline=False)
+    if health.LAST_CHECK["checked_at"] is not None:
+        embed.add_field(
+            name="接続状態",
+            value=health.format_health(
+                health.LAST_CHECK["results"], health.LAST_CHECK["checked_at"]
+            ),
+            inline=False,
+        )
     return embed
 
 
@@ -127,6 +136,19 @@ class SetupView(discord.ui.View):
                 config.DB_PATH, interaction.guild.id, kind, None
             )
         await interaction.response.edit_message(
+            embed=build_setup_embed(interaction.guild), view=self
+        )
+
+    @discord.ui.button(
+        label="接続を確認",
+        style=discord.ButtonStyle.secondary,
+        row=2,
+    )
+    async def health_button(self, interaction, button):
+        # Ollama などの確認に数秒かかるので、先に応答してから書き換える
+        await interaction.response.defer()
+        await health.check_and_notify(interaction.client)
+        await interaction.edit_original_response(
             embed=build_setup_embed(interaction.guild), view=self
         )
 

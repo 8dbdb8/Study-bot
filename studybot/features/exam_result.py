@@ -24,6 +24,7 @@ from studybot.exam_results import (
     record_exam_result,
 )
 from studybot.features.digest import find_home_channel
+from studybot.features.exam_prep import send_exam_prep_prompts
 from studybot.features.exam import ExamDateView
 from studybot.replies import respond_private
 from studybot.stats import get_current_exam_target, get_roadmap, get_study_status
@@ -332,3 +333,5 @@ async def exam_result_loop(bot):
     now = datetime.now(JST)
     if is_result_prompt_due(now):
         await send_exam_result_prompts(bot, now)
+        # 同じ20時に、明日が試験の人へ持ち物チェックを送る
+        await send_exam_prep_prompts(bot, now)

@@ -133,7 +133,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
             [option.default for option in view.picker.options],
             [False, True, False, False, False],
         )
-        self.assertEqual(len(view.children), 3)
+        self.assertEqual(len(view.children), 4)
 
         with patch.object(
             type(log_select), "values",

@@ -24,6 +24,7 @@ from studybot.database import (
 )
 from studybot.qualifications import SG
 from studybot.sg_features import (
+    REASON_KINDS,
     add_sg_mistake,
     parse_correct_count,
     save_sg_b_practice,
@@ -302,9 +303,17 @@ class SGMistakeModal(discord.ui.Modal):
             placeholder="例：https://... または 令和6年 問12",
             max_length=200,
         )
+        self.kind_select = discord.ui.Select(
+            placeholder="いちばん近いものを選ぶ",
+            options=[
+                discord.SelectOption(label=kind, value=kind)
+                for kind in REASON_KINDS
+            ],
+        )
         self.reason_input = discord.ui.TextInput(
-            placeholder="例：アクセス制御の条件を読み違えた",
+            placeholder="例：「適切でないもの」を「適切なもの」と読んだ",
             style=discord.TextStyle.paragraph,
+            required=False,
             max_length=300,
         )
         self.memo_input = discord.ui.TextInput(
@@ -317,7 +326,8 @@ class SGMistakeModal(discord.ui.Modal):
         )
         for text, component, description in (
             ("問題のURLまたは番号", self.reference_input, None),
-            ("間違えた理由", self.reason_input, None),
+            ("間違えた理由の種類", self.kind_select, None),
+            ("間違えた理由（任意）", self.reason_input, None),
             ("次回確認すること（任意）", self.memo_input, None),
             ("問題の画像（任意）", self.image_input,
              "スクリーンショットを付けると、復習のときに表示します"),
@@ -337,6 +347,7 @@ class SGMistakeModal(discord.ui.Modal):
                 self.memo_input.value,
                 today=datetime.now(JST).date(),
                 qualification=self.qualification.code,
+                reason_kind=(self.kind_select.values or [None])[0],
             )
         except ValueError as error:
             await interaction.response.send_message(

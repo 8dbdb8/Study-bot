@@ -8,6 +8,7 @@ from discord import app_commands
 from studybot import config
 from studybot.charts import render_calendar, render_study_time_chart
 from studybot.config import JST
+from studybot.checklist import checklist_status, checklist_summary, format_checklist
 from studybot.embeds import build_today_embed, build_week_embed
 from studybot.groups import time_group
 from studybot.habits import format_goal_progress, goal_for_day, get_rest_days
@@ -27,16 +28,18 @@ from studybot.stats import (
     description="今日の勉強時間と連続学習日数を表示"
 )
 async def today(ctx):
+    day = datetime.now(JST).date()
     total_seconds = get_today_total(ctx.author.id)
     goal_text = format_goal_progress(
-        total_seconds,
-        goal_for_day(config.DB_PATH, ctx.author.id, datetime.now(JST).date()),
+        total_seconds, goal_for_day(config.DB_PATH, ctx.author.id, day),
     )
+    status = checklist_status(config.DB_PATH, ctx.author.id, day)
     await ctx.send(embed=build_today_embed(
         total_seconds,
         get_study_streak_safe(ctx.author.id),
         get_exam_countdown_line(ctx.author.id),
         goal_text,
+        (checklist_summary(status), format_checklist(status)) if status else None,
     ))
 
 

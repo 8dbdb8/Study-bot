@@ -375,7 +375,9 @@ class CommandFlowTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(next(
             (f for f in fe_embed.fields if f.name.startswith("今週の目標")), None
         ))
-        self.assertIn("ハードウェア 45%", fe_embed.fields[-1].value)
+        weak_field = next(f for f in fe_embed.fields if f.name.startswith("正答率"))
+        self.assertIn("ハードウェア 45%", weak_field.value)
+        self.assertEqual(fe_embed.fields[-1].name, "今日のチェックリスト")
 
 
 if __name__ == "__main__":

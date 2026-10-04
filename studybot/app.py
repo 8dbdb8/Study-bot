@@ -17,9 +17,11 @@ from studybot.features import (
     data,
     digest,
     exam,
+    exam_prep,
     exam_result,
     focus,
     glossary,
+    health,
     plan,
     presence,
     qualification,
@@ -36,7 +38,8 @@ from studybot.sg_glossary_history import (
 
 # 読み込むと各サブコマンドが /sg や /plan などのグループに登録される
 FEATURE_MODULES = (
-    ai, data, digest, exam, exam_result, focus, glossary, plan, presence,
+    ai, data, digest, exam, exam_result, focus, glossary, health, plan,
+    presence,
     qualification, review, setup, time, weekly_report,
 )
 
@@ -62,6 +65,7 @@ def create_bot():
     study_log_events.register(bot)
     voice.register(bot)
     presence.register(bot)
+    focus.register(bot)
     install_error_handlers(bot)
 
     # 再接続で on_ready が何度呼ばれても、同期と登録は1回だけ
@@ -111,12 +115,16 @@ def create_bot():
             bot.add_view(voice.VCActionView())
             bot.add_view(digest.DailyDigestView())
             bot.add_view(exam_result.ExamResultView())
+            bot.add_view(exam_prep.ExamPrepView())
             digest.daily_digest_loop.start(bot)
             weekly_report.weekly_report_loop.start(bot)
             weekly_report.notion_save_loop.start(bot)
             exam_result.exam_result_loop.start(bot)
             presence.presence_loop.start(bot)
+            health.health_loop.start(bot)
             started = True
+            await focus.resume_focus_timers(bot)
+            await health.check_and_notify(bot)
 
         now = datetime.now(config.JST)
         await presence.update_presence(bot, now)
@@ -129,6 +137,7 @@ def create_bot():
             await weekly_report.save_weeks_to_notion(bot, notion_week, now)
         if exam_result.is_result_prompt_due(now):
             await exam_result.send_exam_result_prompts(bot, now)
+            await exam_prep.send_exam_prep_prompts(bot, now)
 
     return bot
 

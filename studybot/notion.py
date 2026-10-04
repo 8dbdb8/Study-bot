@@ -160,6 +160,10 @@ class NotionClient:
                 )
             return body
 
+    async def retrieve_page(self, page_id):
+        """ページの情報。共有されていないなどで読めなければ NotionError。"""
+        return await self._request("GET", f"/pages/{page_id}")
+
     async def upload_png(self, png, filename):
         """画像をアップロードし、image ブロックで使う file_upload の ID を返す。"""
         created = await self._request("POST", "/file_uploads", json={

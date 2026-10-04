@@ -23,7 +23,14 @@ from studybot.daily_digest import (
     mark_digest_sent,
     take_rest_day,
 )
+from studybot.checklist import (
+    build_checklist_items,
+    checklist_progress,
+    format_checklist,
+    save_checklist,
+)
 from studybot.embeds import build_digest_embed, build_plan_status_embed
+from studybot.exam_prep import get_exam_prep
 from studybot.exam_results import FINAL_STRETCH_DAYS
 from studybot.habits import format_goal_progress, goal_for_day
 from studybot.scoring import has_recent_mock, predict_score, prediction_summary
@@ -178,7 +185,18 @@ def build_daily_digest_embed(user_id, today):
                 )),
             }
 
-    return build_digest_embed(
+    # 試験当日は会場メモだけ。ほかの日は予想得点・目標とチェックリストを付ける
+    checklist_items = []
+    exam_day = final_stretch is not None and final_stretch["days_left"] == 0
+    if exam_day:
+        extra_lines = exam_day_lines(user_id, target)
+    else:
+        extra_lines = digest_extra_lines(user_id, qualification, today)
+        checklist_items = build_checklist_items(
+            qualification, len(due_items), weak, final_stretch is not None,
+            goal_for_day(config.DB_PATH, user_id, today),
+        )
+    embed = build_digest_embed(
         today,
         countdown,
         get_study_streak_safe(user_id, today),
@@ -188,8 +206,23 @@ def build_daily_digest_embed(user_id, today):
         REVIEW_SCORE_THRESHOLD,
         final_stretch,
         qualification.code,
-        digest_extra_lines(user_id, qualification, today),
+        extra_lines,
+        format_checklist(checklist_progress(
+            config.DB_PATH, user_id, today, checklist_items
+        )),
     )
+    if embed is not None and checklist_items:
+        save_checklist(config.DB_PATH, user_id, today, checklist_items)
+    return embed
+
+
+def exam_day_lines(user_id, target):
+    """試験当日の学習メニューに出す、前日に書いた会場メモ。"""
+    prep = get_exam_prep(
+        config.DB_PATH, user_id, target["qualification"],
+        target["exam_on"].isoformat(),
+    )
+    return [f"📍 {prep['memo']}"] if prep["memo"] else []
 
 
 def digest_extra_lines(user_id, qualification, today):

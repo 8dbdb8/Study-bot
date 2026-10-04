@@ -6,7 +6,7 @@ qualifications.py に並べた資格ごとに /{資格} log などを作る。
 
 import asyncio
 import unicodedata
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO
 
 import discord
@@ -32,6 +32,8 @@ from studybot.scoring import (
     save_mock_exam,
 )
 from studybot.sg_features import (
+    format_reason_breakdown,
+    get_reason_breakdown,
     get_sg_b_summary,
     get_sg_category_progress,
     get_sg_mistakes,
@@ -115,7 +117,22 @@ async def show_progress(ctx, qualification):
         qualification,
         get_study_status(ctx.author.id, qualification.code)["average_score"],
     )
+    today = datetime.now(JST).date()
+    reasons = format_reason_breakdown(get_reason_breakdown(
+        config.DB_PATH, ctx.author.id,
+        today - timedelta(days=REASON_BREAKDOWN_DAYS - 1), today,
+        qualification.code,
+    ))
+    if reasons:
+        embed.add_field(
+            name=f"間違え方（直近{REASON_BREAKDOWN_DAYS}日の誤答）",
+            value=reasons, inline=False,
+        )
     await ctx.send(embed=embed, view=WeakReviewView(ctx.author.id, qualification))
+
+
+# /sg progress に出す「間違え方」の集計期間
+REASON_BREAKDOWN_DAYS = 28
 
 
 async def show_status(ctx, qualification):

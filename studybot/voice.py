@@ -21,6 +21,7 @@ from studybot.forms import (
     build_sgb_prompt,
     open_quick_log,
 )
+from studybot.checklist import checklist_status, checklist_summary, format_checklist
 from studybot.habits import format_goal_progress, get_focus_sets, goal_for_day
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
@@ -364,6 +365,12 @@ def build_study_end_extras(user_id, today, today_seconds):
     sets, minutes = get_focus_sets(config.DB_PATH, user_id, today)
     if sets:
         extras.append(("集中タイマー", f"今日 {sets}セット（{minutes}分）"))
+    status = checklist_status(config.DB_PATH, user_id, today)
+    if status:
+        extras.append((
+            f"今日のメニュー {checklist_summary(status)}",
+            format_checklist(status),
+        ))
     return extras
 
 

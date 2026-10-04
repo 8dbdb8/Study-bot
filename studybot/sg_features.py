@@ -55,6 +55,10 @@ def score_from_counts(correct_answers, questions):
     ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP))
 
 
+# 間違えた理由の種類（/review add で選ぶ）
+REASON_KINDS = ("知識不足", "読み違い", "うっかり", "時間切れ", "あいまい")
+
+
 def init_sg_feature_tables(cursor):
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS sg_mistakes (
@@ -117,6 +121,9 @@ def init_sg_feature_tables(cursor):
     if "image_path" not in mistake_columns:
         # 誤答に添付した問題の画像（PCに保存したファイルの場所）
         cursor.execute("ALTER TABLE sg_mistakes ADD COLUMN image_path TEXT")
+    if "reason_kind" not in mistake_columns:
+        # 間違えた理由の種類（REASON_KINDS のどれか）。古い誤答は NULL
+        cursor.execute("ALTER TABLE sg_mistakes ADD COLUMN reason_kind TEXT")
     for table in QUALIFICATION_COLUMN_TABLES:
         columns = {
             row[1] for row in cursor.execute(f"PRAGMA table_info({table})")
@@ -143,8 +150,9 @@ def validate_question_ref(value):
 
 def add_sg_mistake(
     db_path, user_id, category, question_ref, reason, memo="", today=None,
-    qualification="SG",
+    qualification="SG", reason_kind=None,
 ):
+    """reason_kind（理由の種類）を選んだときは、reason の文章は空でもよい。"""
     qualification = _qualification(qualification)
     if category not in qualification.category_names:
         raise ValueError(
@@ -155,7 +163,9 @@ def add_sg_mistake(
     reference = validate_question_ref(question_ref)
     reason = (reason or "").strip()
     memo = (memo or "").strip()
-    if not reason or len(reason) > 300:
+    if reason_kind is not None and reason_kind not in REASON_KINDS:
+        raise ValueError("間違えた理由の種類は候補から選んでください。")
+    if len(reason) > 300 or (not reason and reason_kind is None):
         raise ValueError("間違えた理由を300文字以内で入力してください。")
     if len(memo) > 500:
         raise ValueError("メモは500文字以内で入力してください。")
@@ -166,11 +176,12 @@ def add_sg_mistake(
         cursor = conn.execute("""
             INSERT INTO sg_mistakes (
                 user_id, category, question_ref, reason, memo,
-                created_on, next_review_on, qualification
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                created_on, next_review_on, qualification, reason_kind
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, category, reference, reason, memo or None,
             today.isoformat(), due.isoformat(), qualification.code,
+            reason_kind,
         ))
         return cursor.lastrowid, due
 
@@ -181,7 +192,8 @@ def get_sg_mistakes(db_path, user_id, today=None, due_only=True,
     today = today or date.today()
     query = """
         SELECT id, category, question_ref, reason, memo,
-               next_review_on, success_streak, qualification, image_path
+               next_review_on, success_streak, qualification, image_path,
+               reason_kind
         FROM sg_mistakes
         WHERE user_id = ? AND completed_on IS NULL
     """
@@ -457,3 +469,51 @@ def set_mistake_image(db_path, user_id, mistake_id, image_path):
             UPDATE sg_mistakes SET image_path = ?
             WHERE id = ? AND user_id = ?
         """, (image_path, mistake_id, user_id))
+
+
+def get_reason_breakdown(db_path, user_id, start, end, qualification=None):
+    """start〜end に登録した誤答の、理由の種類ごとの数。
+
+    {"items": [(種類, 数), ...]（多い順）, "total": 誤答の数,
+     "unclassified": 種類を選んでいない数}
+    """
+    query = """
+        SELECT reason_kind, COUNT(*) FROM sg_mistakes
+        WHERE user_id = ? AND created_on BETWEEN ? AND ?
+    """
+    params = [user_id, start.isoformat(), end.isoformat()]
+    if qualification is not None:
+        query += " AND qualification = ?"
+        params.append(qualification)
+    query += " GROUP BY reason_kind"
+    try:
+        with _connect(db_path) as conn:
+            rows = conn.execute(query, params).fetchall()
+    except sqlite3.Error:
+        rows = []
+    counts = {kind: count for kind, count in rows}
+    unclassified = counts.pop(None, 0)
+    items = sorted(
+        counts.items(),
+        key=lambda pair: (-pair[1], REASON_KINDS.index(pair[0])
+                          if pair[0] in REASON_KINDS else len(REASON_KINDS)),
+    )
+    return {
+        "items": items,
+        "total": sum(counts.values()) + unclassified,
+        "unclassified": unclassified,
+    }
+
+
+def format_reason_breakdown(breakdown):
+    """例：読み違い 6問（40%） ・ 知識不足 5問（33%）。種類つきの誤答がなければ None。"""
+    classified = breakdown["total"] - breakdown["unclassified"]
+    if not classified:
+        return None
+    text = " ・ ".join(
+        f"{kind} {count}問（{count / classified * 100:.0f}%）"
+        for kind, count in breakdown["items"]
+    )
+    if breakdown["unclassified"]:
+        text += f"（種類なし {breakdown['unclassified']}問）"
+    return text
