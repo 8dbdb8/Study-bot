@@ -5,21 +5,32 @@ qualifications.py に並べた資格ごとに /{資格} log などを作る。
 """
 
 import asyncio
+import unicodedata
 from datetime import datetime
+from io import BytesIO
 
 import discord
 from discord import app_commands
 
 from studybot import config
-from studybot.charts import render_score_chart
+from studybot.charts import render_mock_chart, render_score_chart
 from studybot.config import JST, REVIEW_SCORE_THRESHOLD
-from studybot.embeds import COLOR_DEFAULT, build_progress_embed
+from studybot.embeds import COLOR_DEFAULT, COLOR_SUCCESS, build_progress_embed
 from studybot.formatting import format_category_label, get_review_candidates
 from studybot.features.review import build_review_session
 from studybot.forms import build_sgb_prompt, build_sglog_prompt, open_quick_log
 from studybot.groups import QUALIFICATION_GROUPS
 from studybot.qualifications import QUALIFICATIONS
 from studybot.replies import respond_private, send_png, send_private
+from studybot.scoring import (
+    DISCLAIMER,
+    MIN_PREDICTION_QUESTIONS,
+    format_margin,
+    list_mock_exams,
+    predict_score,
+    prediction_summary,
+    save_mock_exam,
+)
 from studybot.sg_features import (
     get_sg_b_summary,
     get_sg_category_progress,
@@ -79,7 +90,9 @@ class WeakReviewView(discord.ui.View):
             embed, view = build_review_session(
                 self.owner_id, datetime.now(JST).date(), items
             )
-            await respond_private(interaction, embed=embed, view=view)
+            await respond_private(
+                interaction, embed=embed, view=view, files=view.files()
+            )
             return
         # 誤答がなければ、一番弱い分野で問題を解いて記録する
         weakest = get_weak_categories(
@@ -164,7 +177,151 @@ async def show_status(ctx, qualification):
     embed.add_field(
         name="要復習候補", value=review_text[:1024], inline=False
     )
+    add_prediction_field(
+        embed, ctx.author.id, qualification, datetime.now(JST).date()
+    )
     await ctx.send(embed=embed)
+
+
+def add_prediction_field(embed, user_id, qualification, today):
+    """予想得点の欄。記録が足りなければ、その旨を書く。"""
+    prediction = predict_score(config.DB_PATH, user_id, qualification, today)
+    if prediction is None:
+        embed.add_field(
+            name="予想得点",
+            value=(
+                f"直近4週間に科目Aを{MIN_PREDICTION_QUESTIONS}問以上解くと、"
+                "予想得点を表示します。"
+            ),
+            inline=False,
+        )
+        return
+    lines = [f"**{prediction_summary(prediction, qualification)}**"]
+    lines.append(" ・ ".join(
+        f"{name} 正答率{rate:.0f}%（{count}問）"
+        for name, rate, count in prediction["parts"]
+    ))
+    if prediction["hint"]:
+        lines.append(f"伸びしろ：{prediction['hint']}")
+    if prediction["note"]:
+        lines.append(prediction["note"])
+    lines.append(DISCLAIMER)
+    embed.add_field(name="予想得点", value="\n".join(lines), inline=False)
+
+
+# ============================================================
+# 模試（本番形式）の記録
+# ============================================================
+
+class MockExamModal(discord.ui.Modal):
+    """模試の正解数と時間を入れる。問題数が決まっていない区分は問題数も入れる。"""
+
+    def __init__(self, qualification):
+        super().__init__(title=f"{qualification.code} 模試（本番形式）を記録"[:45])
+        self.qualification = qualification
+        self.part_inputs = []
+        for name, total in qualification.exam_parts:
+            correct = discord.ui.TextInput(placeholder="例：33", max_length=3)
+            label = f"{name}の正解数" + (f"（{total}問中）" if total else "")
+            self.add_item(discord.ui.Label(text=label, component=correct))
+            total_input = None
+            if not total:
+                total_input = discord.ui.TextInput(
+                    placeholder="例：60", max_length=3
+                )
+                self.add_item(discord.ui.Label(
+                    text=f"{name}の問題数", component=total_input
+                ))
+            self.part_inputs.append((total, correct, total_input))
+        placeholder = (
+            f"本番は{qualification.exam_minutes}分（空欄でも可）"
+            if qualification.exam_minutes else "空欄でも可"
+        )
+        self.minutes_input = discord.ui.TextInput(
+            placeholder=placeholder, required=False, max_length=3
+        )
+        self.add_item(discord.ui.Label(
+            text="かかった時間（分）", component=self.minutes_input
+        ))
+
+    def parse(self):
+        """[(正解数, 問題数)], 分。入力が数字でなければ ValueError。"""
+        def number(text, label):
+            text = unicodedata.normalize("NFKC", text or "").strip()
+            if not text.isdecimal():
+                raise ValueError(f"{label}は数字で入力してください。")
+            return int(text)
+
+        parts = []
+        for total, correct_input, total_input in self.part_inputs:
+            count = total or number(total_input.value, "問題数")
+            parts.append((number(correct_input.value, "正解数"), count))
+        minutes_text = (self.minutes_input.value or "").strip()
+        minutes = number(minutes_text, "時間") if minutes_text else None
+        return parts, minutes
+
+    async def on_submit(self, interaction):
+        try:
+            parts, minutes = self.parse()
+            _, score = save_mock_exam(
+                config.DB_PATH, interaction.user.id, self.qualification,
+                datetime.now(JST).date(), parts, minutes,
+            )
+        except ValueError as error:
+            await interaction.response.send_message(str(error), ephemeral=True)
+            return
+
+        await interaction.response.defer()
+        embed, png = await build_mock_result(
+            interaction.user.id, self.qualification, parts, minutes, score
+        )
+        await interaction.followup.send(
+            embed=embed, file=discord.File(BytesIO(png), filename="mock.png")
+        )
+
+
+async def build_mock_result(user_id, qualification, parts, minutes, score):
+    """模試の結果の Embed と、これまでの得点のグラフ。"""
+    history = list_mock_exams(config.DB_PATH, user_id, qualification.code)
+    margin = (
+        score - qualification.pass_score
+        if qualification.pass_score is not None else None
+    )
+    title = f"{qualification.code} 模試 第{len(history)}回 ・ {score}点"
+    if margin is not None:
+        title += f"（{format_margin(margin)}）"
+    embed = discord.Embed(
+        title=title,
+        color=COLOR_SUCCESS if margin is not None and margin >= 0 else COLOR_DEFAULT,
+    )
+    for (name, _), (correct, total) in zip(qualification.exam_parts, parts):
+        embed.add_field(name=name, value=f"{correct}/{total}問")
+    if minutes is not None:
+        limit = f"/{qualification.exam_minutes}" if qualification.exam_minutes else ""
+        embed.add_field(name="時間", value=f"{minutes}{limit}分")
+    if qualification.scoring == "separate":
+        embed.description = "科目ごとに600点以上が必要なため、低い方の点数を表示しています。"
+    embed.set_image(url="attachment://mock.png")
+
+    mocks = [
+        {"label": f"{int(m['taken_on'][5:7])}/{int(m['taken_on'][8:10])}",
+         "score": m["score"]}
+        for m in history[-10:]
+    ]
+    png = await asyncio.to_thread(
+        render_mock_chart, mocks, f"{qualification.code} 模試の得点",
+        qualification.pass_score,
+    )
+    return embed, png
+
+
+async def record_mock(ctx, qualification):
+    if getattr(ctx, "interaction", None) is not None:
+        await ctx.interaction.response.send_modal(MockExamModal(qualification))
+        return
+    await ctx.send(
+        f"模試の記録は `/{qualification.command} mock` から入力してください。"
+    )
 
 
 async def show_chart(ctx, qualification, category="all"):
@@ -251,6 +408,15 @@ def add_qualification_commands(qualification, group):
         await show_status(ctx, qualification)
 
     created["status"] = status_command
+
+    @group.command(
+        name="mock",
+        description=f"{code}の模試（本番形式）の結果を記録して推移を表示",
+    )
+    async def mock_command(ctx):
+        await record_mock(ctx, qualification)
+
+    created["mock"] = mock_command
     return created
 
 

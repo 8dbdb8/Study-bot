@@ -1,6 +1,7 @@
 """/review グループ：誤答の登録と復習。"""
 
 from datetime import datetime
+from pathlib import Path
 
 import discord
 from discord import app_commands
@@ -51,13 +52,30 @@ class ReviewSessionView(discord.ui.View):
     def finished(self):
         return self.index >= len(self.items)
 
+    def _image_path(self):
+        if self.finished:
+            return None
+        path = self.items[self.index].get("image_path")
+        return Path(path) if path and Path(path).exists() else None
+
     def embed(self):
         if self.finished:
             return build_review_summary_embed(self.results)
-        return build_review_card_embed(
+        embed = build_review_card_embed(
             self.items[self.index], self.index + 1, len(self.items),
             self.current_code,
         )
+        image = self._image_path()
+        if image is not None:
+            embed.set_image(url=f"attachment://mistake{image.suffix}")
+        return embed
+
+    def files(self):
+        """今のカードに付ける画像（なければ空）。"""
+        image = self._image_path()
+        if image is None:
+            return []
+        return [discord.File(image, filename=f"mistake{image.suffix}")]
 
     async def _advance(self, interaction, result):
         item = self.items[self.index]
@@ -82,11 +100,12 @@ class ReviewSessionView(discord.ui.View):
         if self.finished:
             self.stop()
             await interaction.response.edit_message(
-                embed=self.embed(), view=None
+                embed=self.embed(), view=None, attachments=[]
             )
         else:
+            # 前のカードの画像を外し、このカードの画像に差し替える
             await interaction.response.edit_message(
-                embed=self.embed(), view=self
+                embed=self.embed(), view=self, attachments=self.files()
             )
 
     @discord.ui.button(label="正解した", style=discord.ButtonStyle.success)
@@ -175,7 +194,7 @@ async def review_start(ctx):
     if view is None:
         await send_private(ctx, content)
     else:
-        await send_private(ctx, embed=content, view=view)
+        await send_private(ctx, embed=content, view=view, files=view.files())
 
 
 @review_group.command(

@@ -67,13 +67,15 @@ def week_lines(rows, today):
 # 勉強時間
 # ------------------------------------------------------------
 
-def build_today_embed(total_seconds, streak, countdown=None):
+def build_today_embed(total_seconds, streak, countdown=None, goal_text=None):
     embed = discord.Embed(
         title="今日の勉強時間",
         description=f"## {format_minutes(total_seconds)}",
         color=COLOR_DEFAULT,
     )
     embed.add_field(name="連続学習", value=f"🔥 {streak}日", inline=True)
+    if goal_text:
+        embed.add_field(name="今日の目標", value=goal_text, inline=False)
     if countdown:
         embed.add_field(name="試験", value=countdown, inline=False)
     return embed
@@ -95,7 +97,7 @@ def build_week_embed(rows, today, streak):
 
 def build_vc_summary_embed(
     display_name, session_seconds, today_seconds, week_rows, today,
-    streak, countdown=None, log_channel_label="#勉強ログ",
+    streak, countdown=None, log_channel_label="#勉強ログ", extra_fields=(),
 ):
     week_seconds = sum(seconds for _, seconds in week_rows)
     embed = discord.Embed(
@@ -114,6 +116,8 @@ def build_vc_summary_embed(
         value=week_lines(week_rows, today) or "—",
         inline=False,
     )
+    for name, value in extra_fields:
+        embed.add_field(name=name, value=value, inline=False)
     if countdown:
         embed.add_field(name="試験", value=countdown, inline=False)
     return embed
@@ -381,6 +385,7 @@ def _final_stretch_fields(embed, final_stretch):
 def build_digest_embed(
     today, countdown, streak, due_items, plan_week=None, weak=(),
     threshold=60.0, final_stretch=None, current_code="SG",
+    extra_lines=(),
 ):
     """今日伝えることがなければNoneを返す。
 
@@ -407,7 +412,8 @@ def build_digest_embed(
         if final_stretch is not None:
             title += " ・ 直前モード"
         description = "\n".join(
-            line for line in (countdown, f"🔥 連続学習 {streak}日") if line
+            line for line in (countdown, f"🔥 連続学習 {streak}日", *extra_lines)
+            if line
         )
 
     embed = discord.Embed(

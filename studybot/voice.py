@@ -21,6 +21,7 @@ from studybot.forms import (
     build_sgb_prompt,
     open_quick_log,
 )
+from studybot.habits import format_goal_progress, get_focus_sets, goal_for_day
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
 from studybot.stats import (
@@ -352,16 +353,33 @@ async def on_voice_state_update(
         )
 
 
+def build_study_end_extras(user_id, today, today_seconds):
+    """退出通知に足す欄：今日の目標と、集中タイマーのセット数。"""
+    extras = []
+    goal_text = format_goal_progress(
+        today_seconds, goal_for_day(config.DB_PATH, user_id, today)
+    )
+    if goal_text:
+        extras.append(("今日の目標", goal_text))
+    sets, minutes = get_focus_sets(config.DB_PATH, user_id, today)
+    if sets:
+        extras.append(("集中タイマー", f"今日 {sets}セット（{minutes}分）"))
+    return extras
+
+
 def build_study_end_embed(guild, user_id, display_name, session_seconds):
+    today = datetime.now(JST).date()
+    today_seconds = get_today_total(user_id)
     return build_vc_summary_embed(
         display_name,
         session_seconds,
-        get_today_total(user_id),
+        today_seconds,
         get_week_total(user_id),
-        datetime.now(JST).date(),
+        today,
         get_study_streak_safe(user_id),
         get_exam_countdown_line(user_id),
         channel_label(guild, "study_log"),
+        build_study_end_extras(user_id, today, today_seconds),
     )
 
 

@@ -29,6 +29,14 @@ class Qualification:
     category_aliases: dict = field(default_factory=dict)
     # 過去の記録との互換のために受け付ける分野（選択肢には出さない）
     extra_categories: tuple = ()
+    # 本番の形式：((区分, 問題数), ...)。問題数が分からない区分は None
+    exam_parts: tuple = ()
+    # "combined"＝合計で採点（SG）、"separate"＝区分ごとに合格点が必要（FE）
+    scoring: str = "combined"
+    # 1000点満点での合格点。分からなければ None（予想得点の目安を出さない）
+    pass_score: int | None = 600
+    # 本番の試験時間（分）
+    exam_minutes: int | None = None
 
     @property
     def label(self):
@@ -114,6 +122,10 @@ SG = Qualification(
         ("セキュリティ", "テクノロジ系"),
         ("法務", "ストラテジ系"),
     ),
+    # 科目A・Bをまとめて120分、総合評価点600点以上で合格
+    exam_parts=(("科目A", 48), ("科目B", 12)),
+    scoring="combined",
+    exam_minutes=120,
 )
 
 FE_TECHNOLOGY = (
@@ -152,6 +164,10 @@ FE = Qualification(
         "経営組織論": "経営・組織論",
         "法律": "法務",
     },
+    # 科目A（90分）と科目B（100分）のそれぞれで600点以上が必要
+    exam_parts=(("科目A", 60), ("科目B", 20)),
+    scoring="separate",
+    exam_minutes=190,
 )
 
 IRYO_FIELDS = ("情報処理技術系", "医学・医療系", "医療情報システム系")
@@ -169,6 +185,9 @@ IRYO = Qualification(
         "医学医療系": "医学・医療系",
         "医療情報システム": "医療情報システム系",
     },
+    # 問題数や合格点はここでは決めず、模試の記録で入力してもらう
+    exam_parts=(("全体", None),),
+    pass_score=None,
 )
 
 QUALIFICATIONS = (SG, FE, IRYO)

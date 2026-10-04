@@ -10,6 +10,8 @@ from studybot.channels import init_channel_settings_table
 from studybot.config import JST
 from studybot.daily_digest import init_daily_digest_tables
 from studybot.exam_results import init_exam_result_tables
+from studybot.habits import init_habit_tables
+from studybot.scoring import init_scoring_tables
 from studybot.notion_store import init_notion_final_table, init_notion_tables
 from studybot.weekly_report import init_weekly_report_tables
 from studybot.exam_schedule import init_exam_date_table
@@ -374,6 +376,8 @@ def init_db():
     init_notion_tables(cursor)
     init_notion_final_table(cursor)
     init_exam_result_tables(cursor)
+    init_scoring_tables(cursor)
+    init_habit_tables(cursor)
     init_channel_settings_table(cursor)
 
     cursor.execute("""

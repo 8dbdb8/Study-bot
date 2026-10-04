@@ -3,3 +3,4 @@
 __pycache__/
 *.db
 *.log
+data/mistake_images/

@@ -25,6 +25,8 @@ from studybot.daily_digest import (
 )
 from studybot.embeds import build_digest_embed, build_plan_status_embed
 from studybot.exam_results import FINAL_STRETCH_DAYS
+from studybot.habits import format_goal_progress, goal_for_day
+from studybot.scoring import has_recent_mock, predict_score, prediction_summary
 from studybot.exam_schedule import format_exam_countdown
 from studybot.features.review import build_review_session
 from studybot.forms import open_quick_log
@@ -39,6 +41,7 @@ from studybot.stats import (
     get_current_exam_target,
     get_exam_countdown_line,
     get_study_streak_safe,
+    get_today_total,
 )
 
 
@@ -62,7 +65,9 @@ class DailyDigestView(discord.ui.View):
         if view is None:
             await respond_private(interaction, content)
         else:
-            await respond_private(interaction, embed=content, view=view)
+            await respond_private(
+                interaction, embed=content, view=view, files=view.files()
+            )
 
     @discord.ui.button(
         label="今週の計画",
@@ -161,7 +166,12 @@ def build_daily_digest_embed(user_id, today):
             final_stretch = {
                 "days_left": days_left,
                 "label": target["label"],
-                "focus": final_stretch_focus(weak),
+                "focus": final_stretch_focus(
+                    weak,
+                    suggest_mock=not has_recent_mock(
+                        config.DB_PATH, user_id, qualification.code, today
+                    ),
+                ),
                 "unfinished": len(get_sg_mistakes(
                     config.DB_PATH, user_id, today=today, due_only=False,
                     qualification=qualification.code,
@@ -178,15 +188,35 @@ def build_daily_digest_embed(user_id, today):
         REVIEW_SCORE_THRESHOLD,
         final_stretch,
         qualification.code,
+        digest_extra_lines(user_id, qualification, today),
     )
+
+
+def digest_extra_lines(user_id, qualification, today):
+    """学習メニューの本文に足す行（予想得点・今日の目標）。"""
+    lines = []
+    summary = prediction_summary(
+        predict_score(config.DB_PATH, user_id, qualification, today),
+        qualification,
+    )
+    if summary:
+        lines.append(f"📈 {summary}")
+    goal = goal_for_day(config.DB_PATH, user_id, today)
+    if goal:
+        progress = format_goal_progress(get_today_total(user_id), goal)
+        lines.append(f"🎯 今日の目標 {progress}")
+    return lines
 
 
 # 直前モードで弱い分野に割り当てる、今日の問題数（弱い順）
 FINAL_STRETCH_QUOTAS = (20, 10, 10)
 
 
-def final_stretch_focus(weak):
-    """直前モードの「今日の重点」。[(項目, 量), ...]"""
+def final_stretch_focus(weak, suggest_mock=False):
+    """直前モードの「今日の重点」。[(項目, 量), ...]
+
+    suggest_mock：この1週間に模試をしていなければ「模試を1回」を足す。
+    """
     weakest = sorted(weak, key=lambda item: item[1])[:len(FINAL_STRETCH_QUOTAS)]
     focus = [
         (f"{category}（直近 {score:.0f}%）", f"{quota}問")
@@ -195,6 +225,8 @@ def final_stretch_focus(weak):
     if not focus:
         focus = [("総合演習（全分野）", "20問")]
     focus.append(("科目B", "1セット"))
+    if suggest_mock:
+        focus.append(("模試（本番形式）", "今週1回"))
     return focus
 
 

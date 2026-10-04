@@ -29,6 +29,7 @@ from studybot.formatting import (
     get_review_candidates,
 )
 from studybot.groups import plan_group
+from studybot.habits import get_study_goal, set_study_goal
 from studybot.ollama import ask_ollama
 from studybot.qualifications import current_qualification
 from studybot.replies import send_long, send_private
@@ -395,3 +396,38 @@ async def plan_notify(ctx, menu: str | None = None, report: str | None = None):
     )
     lines.append(_notify_schedule_text(ctx.guild))
     await send_private(ctx, "\n".join(lines))
+
+
+@plan_group.command(
+    name="goal",
+    description="1日の目標勉強時間を設定（平日・土日祝で別々）",
+)
+@app_commands.describe(
+    weekday="平日の目標（分）。0でなし",
+    holiday="土日祝の目標（分）。0でなし",
+)
+async def plan_goal(ctx, weekday: int | None = None, holiday: int | None = None):
+    if weekday is not None or holiday is not None:
+        try:
+            set_study_goal(config.DB_PATH, ctx.author.id, weekday, holiday)
+        except ValueError as error:
+            await send_private(ctx, str(error))
+            return
+    current_weekday, current_holiday = get_study_goal(
+        config.DB_PATH, ctx.author.id
+    )
+
+    def text(minutes):
+        return f"{minutes}分" if minutes else "なし"
+
+    header = (
+        "1日の目標時間を設定しました。"
+        if weekday is not None or holiday is not None
+        else "`/plan goal weekday:30 holiday:90` のように設定できます。"
+    )
+    await send_private(
+        ctx,
+        f"{header}\n平日：**{text(current_weekday)}**"
+        f"　土日祝：**{text(current_holiday)}**\n"
+        "達成度は `/time today`・勉強部屋の退出通知・学習メニューに表示します。",
+    )

@@ -111,6 +111,12 @@ def init_sg_feature_tables(cursor):
         CREATE INDEX IF NOT EXISTS idx_sg_plans_active
         ON sg_plans(user_id, active, id)
     """)
+    mistake_columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(sg_mistakes)")
+    }
+    if "image_path" not in mistake_columns:
+        # 誤答に添付した問題の画像（PCに保存したファイルの場所）
+        cursor.execute("ALTER TABLE sg_mistakes ADD COLUMN image_path TEXT")
     for table in QUALIFICATION_COLUMN_TABLES:
         columns = {
             row[1] for row in cursor.execute(f"PRAGMA table_info({table})")
@@ -175,7 +181,7 @@ def get_sg_mistakes(db_path, user_id, today=None, due_only=True,
     today = today or date.today()
     query = """
         SELECT id, category, question_ref, reason, memo,
-               next_review_on, success_streak, qualification
+               next_review_on, success_streak, qualification, image_path
         FROM sg_mistakes
         WHERE user_id = ? AND completed_on IS NULL
     """
@@ -443,3 +449,11 @@ def get_weak_categories(db_path, user_id, qualification="SG", threshold=60.0,
         and (threshold is None or item["latest_score"] < threshold)
     ]
     return sorted(weak, key=lambda pair: pair[1])
+
+
+def set_mistake_image(db_path, user_id, mistake_id, image_path):
+    with _connect(db_path) as conn:
+        conn.execute("""
+            UPDATE sg_mistakes SET image_path = ?
+            WHERE id = ? AND user_id = ?
+        """, (image_path, mistake_id, user_id))

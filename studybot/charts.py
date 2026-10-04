@@ -10,6 +10,7 @@ from io import BytesIO
 from matplotlib import font_manager
 from matplotlib.dates import DayLocator, date2num, num2date
 from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
 from matplotlib.ticker import FuncFormatter
 
 
@@ -193,5 +194,139 @@ def render_score_chart(points, title, threshold=60.0):
         f"{start.month}/{start.day}〜{end.month}/{end.day} ・ "
         f"{len(points)}日分 ・ 合計 {total_questions}問 ・ "
         f"点線は合格目安の{threshold:.0f}%",
+    )
+    return _to_png(fig)
+
+
+def render_mock_chart(mocks, title, pass_score=None):
+    """模試の得点の推移（棒）と合格ライン（点線）。mocks は古い順。"""
+    labels = [mock["label"] for mock in mocks]
+    scores = [mock["score"] for mock in mocks]
+
+    fig = _new_figure(height=4.8)
+    ax = fig.add_axes([0.08, 0.12, 0.86, 0.66])
+    _style_axes(ax)
+    positions = list(range(len(scores)))
+    ax.bar(positions, scores, width=0.6, color=SERIES_1)
+    for x, score in zip(positions, scores):
+        ax.annotate(
+            f"{score}", xy=(x, score), xytext=(0, 4),
+            textcoords="offset points", ha="center",
+            color=TEXT_PRIMARY, fontsize=9, fontweight="bold",
+        )
+    if pass_score is not None:
+        ax.axhline(pass_score, color=TEXT_SECONDARY, linewidth=1,
+                   linestyle=(0, (4, 4)))
+        ax.text(1.0, pass_score, f"合格 {pass_score}",
+                transform=ax.get_yaxis_transform(),
+                color=TEXT_SECONDARY, fontsize=8, va="bottom", ha="right")
+    ax.set_ylim(0, 1000)
+    ax.set_xlim(-0.6, max(len(scores), 5) - 0.4)
+    ax.set_xticks(positions)
+    ax.set_xticklabels(labels)
+    ax.set_ylabel("点", color=TEXT_SECONDARY, fontsize=9, rotation=0,
+                  labelpad=12)
+
+    best = max(scores) if scores else 0
+    _title(fig, title, f"{len(scores)}回 ・ 最高 {best}点 ・ 点線は合格ライン")
+    return _to_png(fig)
+
+
+# 学習カレンダーの色（勉強時間が長いほど明るい青）
+CALENDAR_EMPTY = "#2c2c2a"
+CALENDAR_LEVELS = (
+    (30, "#184f95"),
+    (60, "#256abf"),
+    (120, "#3987e5"),
+    (None, "#86b6ef"),
+)
+
+
+def _calendar_color(minutes):
+    if minutes <= 0:
+        return CALENDAR_EMPTY
+    for limit, color in CALENDAR_LEVELS:
+        if limit is None or minutes < limit:
+            return color
+    return CALENDAR_LEVELS[-1][1]
+
+
+def render_calendar(daily_seconds, rest_days, end, weeks=13):
+    """GitHub の草のような学習カレンダー。列が週（月曜始まり）、行が曜日。"""
+    first_monday = end - timedelta(days=end.weekday() + 7 * (weeks - 1))
+    # マスを正方形にするため、週の数に合わせて画像の横幅を決める
+    unit = 0.42
+    grid_w = (weeks + 0.5) * unit
+    grid_h = 8.4 * unit
+    fig_w = max(grid_w + 1.0, 8.0)
+    fig_h = grid_h + 1.45
+    fig = Figure(figsize=(fig_w, fig_h), dpi=150, facecolor=SURFACE)
+    ax = fig.add_axes([0.7 / fig_w, 0.55 / fig_h, grid_w / fig_w, grid_h / fig_h])
+    ax.set_facecolor(SURFACE)
+    ax.set_xlim(-0.5, weeks)
+    ax.set_ylim(7.2, -1.2)
+    ax.axis("off")
+
+    total_minutes = 0
+    studied_days = 0
+    previous_month = None
+    for week in range(weeks):
+        for weekday in range(7):
+            day = first_monday + timedelta(days=week * 7 + weekday)
+            if day > end:
+                continue
+            minutes = daily_seconds.get(day, 0) / 60
+            total_minutes += minutes
+            studied_days += minutes > 0
+            ax.add_patch(Rectangle(
+                (week + 0.06, weekday + 0.06), 0.88, 0.88,
+                facecolor=_calendar_color(minutes), linewidth=0,
+            ))
+            if day in rest_days and minutes <= 0:
+                ax.add_patch(Rectangle(
+                    (week + 0.12, weekday + 0.12), 0.76, 0.76,
+                    facecolor="none", edgecolor=SERIES_2, linewidth=1.5,
+                ))
+            if day == end:
+                ax.add_patch(Rectangle(
+                    (week + 0.03, weekday + 0.03), 0.94, 0.94,
+                    facecolor="none", edgecolor=TEXT_PRIMARY, linewidth=1.2,
+                ))
+            if weekday == 0 and day.month != previous_month:
+                ax.text(week + 0.06, -0.35, f"{day.month}月",
+                        color=TEXT_SECONDARY, fontsize=8, va="bottom")
+                previous_month = day.month
+
+    for weekday, label in ((0, "月"), (2, "水"), (4, "金"), (6, "日")):
+        ax.text(-0.15, weekday + 0.5, label, color=TEXT_SECONDARY,
+                fontsize=8, ha="right", va="center")
+
+    # 凡例（インチで位置を決めて、画像の幅が変わっても崩れないようにする）
+    legend_y = 0.28 / fig_h
+    box_w, box_h = 0.16 / fig_w, 0.16 / fig_h
+    x = 0.7 / fig_w
+    fig.text(x, legend_y, "少", color=TEXT_SECONDARY, fontsize=8, va="center")
+    x += 0.2 / fig_w
+    for color in [CALENDAR_EMPTY] + [color for _, color in CALENDAR_LEVELS]:
+        fig.patches.append(Rectangle(
+            (x, legend_y - box_h / 2), box_w, box_h,
+            transform=fig.transFigure, facecolor=color, figure=fig,
+        ))
+        x += 0.2 / fig_w
+    fig.text(x, legend_y, "多", color=TEXT_SECONDARY, fontsize=8, va="center")
+    x += 0.5 / fig_w
+    fig.patches.append(Rectangle(
+        (x, legend_y - box_h / 2), box_w, box_h, transform=fig.transFigure,
+        facecolor=CALENDAR_EMPTY, edgecolor=SERIES_2, linewidth=1.5, figure=fig,
+    ))
+    fig.text(x + 0.22 / fig_w, legend_y, "休みの日", color=TEXT_SECONDARY,
+             fontsize=8, va="center")
+
+    hours, mins = divmod(round(total_minutes), 60)
+    _title(
+        fig,
+        f"学習カレンダー（{first_monday.month}/{first_monday.day}〜{end.month}/{end.day}）",
+        f"勉強した日 {studied_days}日 ・ 合計 {hours}時間{mins:02d}分 ・ "
+        "色が明るいほど長く勉強した日",
     )
     return _to_png(fig)

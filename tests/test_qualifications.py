@@ -282,7 +282,7 @@ class ScreenTests(unittest.TestCase):
 
     def test_commands_per_qualification(self):
         commands = qualification_feature.COMMANDS
-        self.assertEqual(set(commands["FE"]), {"log", "b", "progress", "chart", "status"})
+        self.assertEqual(set(commands["FE"]), {"log", "b", "mock", "progress", "chart", "status"})
         self.assertNotIn("b", commands["医療情報技師"])
         chart_choices = commands["FE"]["chart"].app_command.parameters[0].choices
         self.assertEqual(len(chart_choices), 24)

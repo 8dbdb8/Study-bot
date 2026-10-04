@@ -7,7 +7,7 @@ import discord
 from discord import app_commands
 
 from studybot import config
-from studybot.config import JST
+from studybot.config import JST, REVIEW_SCORE_THRESHOLD
 from studybot.embeds import COLOR_DEFAULT, format_minutes
 from studybot.exam_schedule import WEEKDAY_LABELS
 from studybot.formatting import (
@@ -19,12 +19,17 @@ from studybot.features.notion_export import (
     is_notion_configured,
     save_weekly_report_to_notion,
 )
+from studybot.ai_check import checked_answer
 from studybot.groups import ai_group
+from studybot.habits import get_rest_days
+from studybot.scoring import predict_score, prediction_summary
+from studybot.sg_features import get_weak_categories
 from studybot.qualifications import SG, current_qualification, get_qualification
 from studybot.replies import send_long
 from studybot.ollama import ask_ollama
 from studybot.stats import (
     get_category_status,
+    get_study_streak_safe,
     get_roadmap,
     get_study_status,
     get_today_logs,
@@ -145,6 +150,7 @@ async def next_study(ctx):
                 prompt
             )
 
+            answer = checked_answer(answer, prompt)
             await send_long(ctx, f"🎯 **次の勉強メニュー**\n\n{answer}")
 
         except Exception as e:
@@ -221,7 +227,14 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
         else "現在はなし"
     )
 
+    facts_text, prediction_text = build_weekly_facts(
+        user_id, qualification, report_status, week_rows,
+        today or datetime.now(JST).date(),
+    )
+
     return {
+        "facts_text": facts_text,
+        "prediction_text": prediction_text,
         "start_date": report_status["start_date"],
         "end_date": report_status["end_date"],
         "total_seconds": total_seconds,
@@ -233,6 +246,34 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
         "review_text": review_text,
         "qualification": qualification,
     }
+
+
+def build_weekly_facts(user_id, qualification_code, report_status, week_rows,
+                       today):
+    """AIに「確定した事実」として渡す、Botが計算した内容。"""
+    start = datetime.strptime(report_status["start_date"], "%Y-%m-%d").date()
+    end = datetime.strptime(report_status["end_date"], "%Y-%m-%d").date()
+    period_days = (end - start).days + 1
+    studied_days = sum(1 for _, seconds in week_rows if seconds > 0)
+    rest_days = len(get_rest_days(config.DB_PATH, user_id, start, end))
+    qualification = get_qualification(qualification_code) or SG
+    prediction = predict_score(config.DB_PATH, user_id, qualification, today)
+    weak = get_weak_categories(
+        config.DB_PATH, user_id, qualification.code, REVIEW_SCORE_THRESHOLD
+    )
+    lines = [
+        f"- 集計期間：{period_days}日間（{start.month}/{start.day}〜{end.month}/{end.day}）",
+        f"- 勉強部屋で勉強した日：{studied_days}日",
+        f"- 「今日は休む」で休みにした日：{rest_days}日",
+        f"- 連続学習日数：{get_study_streak_safe(user_id, end)}日",
+        "- 正答率60%未満の分野："
+        + ("、".join(f"{name}（{score:.1f}%）" for name, score in weak) if weak else "なし"),
+        "- 60.0%ちょうどは「60%未満」ではない",
+    ]
+    summary = prediction_summary(prediction, qualification)
+    if summary:
+        lines.append(f"- {summary}（目安）")
+    return "\n".join(lines), summary
 
 
 def build_weekly_report_prompt(data):
@@ -269,7 +310,12 @@ def build_weekly_report_prompt(data):
 【要復習候補（60%未満）】
 {data["review_text"]}
 
+【確定した事実（Botの集計）】
+{data.get("facts_text", "（なし）")}
+
 【データの読み方に関する重要ルール】
+- 数字や日数は、上の記録と【確定した事実】に書かれたものだけを使う
+- 新しい数字を計算したり、推測で数字を作ったりしない
 - 1回の結果だけで弱点と断定しない
 - 曜日別一覧に存在しない曜日を
   「勉強していない」と断定しない
@@ -329,6 +375,10 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
     )
     embed.add_field(name="問題数", value=f"{data['total_questions']}問")
     embed.add_field(name="平均正答率", value=data["score_text"])
+    if data.get("prediction_text"):
+        embed.add_field(
+            name="予想得点（目安）", value=data["prediction_text"], inline=False
+        )
     return embed
 
 
@@ -344,8 +394,9 @@ async def create_weekly_report(user_id, today=None):
     if data is None:
         return None
 
+    prompt = build_weekly_report_prompt(data)
     try:
-        answer = await ask_ollama(build_weekly_report_prompt(data))
+        answer = checked_answer(await ask_ollama(prompt), prompt)
     except aiohttp.ClientConnectorError:
         return data, None, "Ollamaに接続できません"
     except Exception as e:
@@ -488,6 +539,7 @@ AIからの提案として、
                 prompt
             )
 
+            answer = checked_answer(answer, prompt)
             await send_long(ctx, f"🤖 **Study Coach**\n\n{answer}")
 
         except aiohttp.ClientConnectorError:

@@ -5,8 +5,10 @@ from io import BytesIO
 import discord
 
 
-def _message_kwargs(content=None, view=None, embed=None):
+def _message_kwargs(content=None, view=None, embed=None, files=None):
     kwargs = {}
+    if files:
+        kwargs["files"] = files
     if content is not None:
         kwargs["content"] = content
     if view is not None:
@@ -16,17 +18,18 @@ def _message_kwargs(content=None, view=None, embed=None):
     return kwargs
 
 
-async def send_private(ctx, content=None, view=None, embed=None):
+async def send_private(ctx, content=None, view=None, embed=None, files=None):
     """スラッシュなら本人だけに、!コマンドなら通常どおり送る。"""
-    kwargs = _message_kwargs(content, view, embed)
+    kwargs = _message_kwargs(content, view, embed, files)
     if getattr(ctx, "interaction", None) is not None:
         kwargs["ephemeral"] = True
     await ctx.send(**kwargs)
 
 
-async def respond_private(interaction, content=None, view=None, embed=None):
+async def respond_private(interaction, content=None, view=None, embed=None,
+                          files=None):
     await interaction.response.send_message(
-        ephemeral=True, **_message_kwargs(content, view, embed)
+        ephemeral=True, **_message_kwargs(content, view, embed, files)
     )
 
 

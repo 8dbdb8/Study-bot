@@ -4,6 +4,7 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import discord
@@ -26,6 +27,7 @@ from studybot.sg_features import (
     add_sg_mistake,
     parse_correct_count,
     save_sg_b_practice,
+    set_mistake_image,
 )
 from studybot.stats import get_study_status
 from studybot.study_log_parser import (
@@ -272,29 +274,57 @@ class SGStudyLogView(discord.ui.View):
         )
 
 
-class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
-    reference_input = discord.ui.TextInput(
-        label="問題のURLまたは番号",
-        placeholder="例：https://... または 令和6年 問12",
-        max_length=200,
-    )
-    reason_input = discord.ui.TextInput(
-        label="間違えた理由",
-        placeholder="例：アクセス制御の条件を読み違えた",
-        style=discord.TextStyle.paragraph,
-        max_length=300,
-    )
-    memo_input = discord.ui.TextInput(
-        label="次回確認すること（任意）",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=500,
-    )
+# 誤答に添付した画像の保存先（Discord の画像リンクは期限切れになるため）
+MISTAKE_IMAGE_DIR = config.PROJECT_ROOT / "data" / "mistake_images"
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
+
+async def save_mistake_image(attachment, mistake_id):
+    """添付された画像を data/mistake_images/ に保存し、そのパスを返す。"""
+    suffix = Path(attachment.filename).suffix.lower()
+    is_image = (attachment.content_type or "").startswith("image/")
+    if suffix not in IMAGE_SUFFIXES and not is_image:
+        raise ValueError("画像ファイル（png・jpg など）を添付してください。")
+    if suffix not in IMAGE_SUFFIXES:
+        suffix = ".png"
+    MISTAKE_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+    path = MISTAKE_IMAGE_DIR / f"{mistake_id}{suffix}"
+    await attachment.save(path)
+    return str(path)
+
+
+class SGMistakeModal(discord.ui.Modal):
     def __init__(self, category, qualification=SG):
         super().__init__(title=f"{qualification.code}の誤答を登録")
         self.category = category
         self.qualification = qualification
+        self.reference_input = discord.ui.TextInput(
+            placeholder="例：https://... または 令和6年 問12",
+            max_length=200,
+        )
+        self.reason_input = discord.ui.TextInput(
+            placeholder="例：アクセス制御の条件を読み違えた",
+            style=discord.TextStyle.paragraph,
+            max_length=300,
+        )
+        self.memo_input = discord.ui.TextInput(
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=500,
+        )
+        self.image_input = discord.ui.FileUpload(
+            required=False, min_values=0, max_values=1
+        )
+        for text, component, description in (
+            ("問題のURLまたは番号", self.reference_input, None),
+            ("間違えた理由", self.reason_input, None),
+            ("次回確認すること（任意）", self.memo_input, None),
+            ("問題の画像（任意）", self.image_input,
+             "スクリーンショットを付けると、復習のときに表示します"),
+        ):
+            self.add_item(discord.ui.Label(
+                text=text, component=component, description=description
+            ))
 
     async def on_submit(self, interaction):
         try:
@@ -314,10 +344,23 @@ class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
             )
             return
 
-        await interaction.response.send_message(
-            f"誤答 #{mistake_id} を登録しました。"
+        await interaction.response.defer(ephemeral=True)
+        image_text = ""
+        attachments = list(self.image_input.values or [])
+        if attachments:
+            try:
+                path = await save_mistake_image(attachments[0], mistake_id)
+                set_mistake_image(
+                    config.DB_PATH, interaction.user.id, mistake_id, path
+                )
+                image_text = "（画像つき）"
+            except (ValueError, discord.HTTPException, OSError) as error:
+                image_text = f"\n⚠️ 画像は保存できませんでした：{error}"
+
+        await interaction.followup.send(
+            f"誤答 #{mistake_id} を登録しました{image_text}。"
             f"次の復習日：{due.isoformat()}\n"
-            "復習するときは `/review list` を開いてください。",
+            "復習するときは `/review start` を開いてください。",
             ephemeral=True,
         )
 
