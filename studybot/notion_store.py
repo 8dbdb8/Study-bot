@@ -3,6 +3,7 @@
 import json
 import sqlite3
 from contextlib import closing
+from datetime import timedelta
 
 
 def init_notion_tables(cursor):
@@ -34,6 +35,50 @@ def init_notion_tables(cursor):
             cursor.execute(
                 f"ALTER TABLE notion_weekly_pages ADD COLUMN {column} TEXT"
             )
+
+
+def init_notion_final_table(cursor):
+    """日曜23:59の保存（その週の確定版）を済ませた週。"""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS notion_final_saves (
+            user_id INTEGER NOT NULL,
+            week_start TEXT NOT NULL,
+            saved_at TEXT NOT NULL,
+            PRIMARY KEY (user_id, week_start)
+        )
+    """)
+
+
+def get_notion_save_candidates(db_path, week_day):
+    """week_day を含む週に勉強の記録があり、確定版をまだ保存していない人。"""
+    monday = (week_day - timedelta(days=week_day.weekday())).isoformat()
+    sunday = week_day.isoformat()
+    with closing(sqlite3.connect(db_path)) as conn:
+        rows = conn.execute("""
+            SELECT user_id FROM (
+                SELECT user_id FROM study_sessions
+                WHERE duration_seconds > 0 AND study_date BETWEEN ? AND ?
+                UNION
+                SELECT user_id FROM study_logs
+                WHERE study_date BETWEEN ? AND ?
+            )
+            WHERE user_id NOT IN (
+                SELECT user_id FROM notion_final_saves WHERE week_start = ?
+            )
+            ORDER BY user_id
+        """, (monday, sunday, monday, sunday, monday)).fetchall()
+    return [row[0] for row in rows]
+
+
+def mark_notion_final_save(db_path, user_id, week_day, saved_at):
+    monday = week_day - timedelta(days=week_day.weekday())
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            conn.execute("""
+                INSERT OR IGNORE INTO notion_final_saves (
+                    user_id, week_start, saved_at
+                ) VALUES (?, ?, ?)
+            """, (user_id, monday.isoformat(), saved_at))
 
 
 def get_notion_database(db_path, parent_page_id):

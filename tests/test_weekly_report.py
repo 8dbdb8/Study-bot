@@ -103,9 +103,9 @@ class WeeklyReportDataTests(_TempDBCase):
 
 
 class _Channel:
-    def __init__(self, guild):
-        self.name = config.STUDY_LOG_CHANNEL_NAME
-        self.id = 20
+    def __init__(self, guild, name=config.STUDY_LOG_CHANNEL_NAME, channel_id=20):
+        self.name = name
+        self.id = channel_id
         self.guild = guild
         self.sent = []
 
@@ -115,10 +115,14 @@ class _Channel:
 
 
 class _Guild:
-    def __init__(self):
+    def __init__(self, with_ai_report=True):
         self.id = 10
         self.channel = _Channel(self)
         self.text_channels = [self.channel]
+        self.ai_report = None
+        if with_ai_report:
+            self.ai_report = _Channel(self, config.AI_REPORT_CHANNEL_NAME, 21)
+            self.text_channels.append(self.ai_report)
 
     async def fetch_member(self, user_id):
         if user_id == 99:
@@ -127,55 +131,107 @@ class _Guild:
 
 
 class SendWeeklyReportTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
-    async def test_sends_once_per_week(self):
+    async def test_sends_once_per_week_to_ai_report(self):
         guild = _Guild()
         fake_bot = SimpleNamespace(get_guild=lambda guild_id: guild)
         for user_id in (1, 2, 99):
             self.add_session(user_id, "2026-10-16")
+        weeks = []
 
-        async def fake_report(user_id):
+        async def fake_report(user_id, today=None):
+            weeks.append(today)
             if user_id == 2:
                 return None
             return DATA, f"report {user_id}", None
 
-        async def no_notion(*args):
-            return None
-
         now = datetime(2026, 10, 18, 21, 0, tzinfo=config.JST)
-        with patch.object(weekly_feature, "create_weekly_report", fake_report), \
-                patch.object(weekly_feature, "save_weekly_report_to_notion", no_notion):
+        with patch.object(weekly_feature, "create_weekly_report", fake_report):
             self.assertEqual(await weekly_feature.send_weekly_reports(fake_bot, now), 1)
             self.assertEqual(await weekly_feature.send_weekly_reports(fake_bot, now), 0)
 
-        sent = guild.channel.sent
+        self.assertEqual(guild.channel.sent, [])   # 勉強ログには出さない
+        sent = guild.ai_report.sent
         self.assertEqual(len(sent), 1)
         self.assertEqual(
             sent[0]["content"], "<@1> 今週もおつかれさまでした。週間レポートです。"
         )
         self.assertEqual(sent[0]["embed"].description, "report 1")
+        self.assertEqual(set(weeks), {SUNDAY})
 
-    async def test_adds_notion_result_line(self):
-        guild = _Guild()
+    async def test_falls_back_to_study_log_without_ai_report(self):
+        guild = _Guild(with_ai_report=False)
         fake_bot = SimpleNamespace(get_guild=lambda guild_id: guild)
         self.add_session(1, "2026-10-16")
-        calls = []
 
-        async def fake_report(user_id):
+        async def fake_report(user_id, today=None):
             return DATA, "report", None
 
-        async def fake_notion(user_id, data, answer, ai_error, today):
-            calls.append((user_id, answer, today))
-            return "📝 Notionにも保存しました：https://notion.so/x"
-
         now = datetime(2026, 10, 18, 21, 0, tzinfo=config.JST)
-        with patch.object(weekly_feature, "create_weekly_report", fake_report), \
-                patch.object(weekly_feature, "save_weekly_report_to_notion", fake_notion):
+        with patch.object(weekly_feature, "create_weekly_report", fake_report):
             await weekly_feature.send_weekly_reports(fake_bot, now)
+        self.assertEqual(len(guild.channel.sent), 1)
 
-        self.assertEqual(calls, [(1, "report", SUNDAY)])
-        self.assertTrue(guild.channel.sent[0]["content"].endswith(
-            "\n📝 Notionにも保存しました：https://notion.so/x"
-        ))
+
+class NotionSaveJobTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        super().setUp()
+        for name, value in (("NOTION_TOKEN", "secret"), ("NOTION_PAGE_ID", "p")):
+            patcher = patch.object(config, name, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
+    def test_save_time(self):
+        def at(day, hour, minute=0):
+            return datetime(2026, 10, day, hour, minute, tzinfo=config.JST)
+
+        week_day = weekly_feature.notion_save_week_day
+        self.assertIsNone(week_day(at(18, 23, 58)))
+        self.assertEqual(week_day(at(18, 23, 59)), SUNDAY)
+        # 月曜の昼までは、止まっていた分として前の週を保存する
+        self.assertEqual(week_day(at(19, 8, 0)), SUNDAY)
+        self.assertIsNone(week_day(at(19, 12, 0)))
+        self.assertIsNone(week_day(at(17, 23, 59)))
+
+    async def test_saves_once_and_notifies_ai_report(self):
+        guild = _Guild()
+        fake_bot = SimpleNamespace(get_guild=lambda guild_id: guild)
+        self.add_session(1, "2026-10-18")
+        self.add_session(2, "2026-10-16")
+        calls = []
+
+        async def fake_report(user_id, today=None):
+            return DATA, f"report {user_id}", None
+
+        async def fake_save(user_id, data, answer, ai_error, today):
+            calls.append((user_id, today))
+            if user_id == 2:
+                return None, "Notionのトークンが正しくありません"
+            return "https://notion.so/week", None
+
+        now = datetime(2026, 10, 18, 23, 59, tzinfo=config.JST)
+        with patch.object(weekly_feature, "create_weekly_report", fake_report), \
+                patch.object(weekly_feature, "try_save_weekly_report", fake_save):
+            self.assertEqual(await weekly_feature.save_weeks_to_notion(fake_bot, SUNDAY, now), 1)
+            # 失敗した人だけ、もう一度保存を試す
+            await weekly_feature.save_weeks_to_notion(fake_bot, SUNDAY, now)
+
+        self.assertEqual(calls, [(1, SUNDAY), (2, SUNDAY), (2, SUNDAY)])
+        texts = [sent["content"] for sent in guild.ai_report.sent]
+        self.assertEqual(
+            texts[0], "📝 10/12〜10/18の記録をNotionに保存しました：https://notion.so/week"
+        )
+        self.assertIn("保存できませんでした：Notionのトークン", texts[1])
+        self.assertEqual(guild.channel.sent, [])
+        self.assertEqual(
+            guild.ai_report.sent[0]["allowed_mentions"].users, False
+        )
+
+    async def test_does_nothing_without_notion_settings(self):
+        self.add_session(1, "2026-10-18")
+        with patch.object(config, "NOTION_TOKEN", None):
+            self.assertEqual(
+                await weekly_feature.save_weeks_to_notion(None, SUNDAY), 0
+            )
 
 
 DATA = {
@@ -222,7 +278,7 @@ class ReportEmbedTests(unittest.IsolatedAsyncioTestCase):
         async def broken(prompt):
             raise RuntimeError("boom")
 
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": DATA), \
+        with patch.object(ai_feature, "collect_weekly_report", lambda *args: DATA), \
                 patch.object(ai_feature, "ask_ollama", broken):
             embed = await ai_feature.create_weekly_report_embed(1)
         self.assertIn("AIのコメントは作れませんでした（AIの処理に失敗）", embed.description)
@@ -233,16 +289,25 @@ class ReportEmbedTests(unittest.IsolatedAsyncioTestCase):
             return "### 今週の実績\nよく頑張りました"
 
         ctx = _Context()
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": DATA), \
+        with patch.object(ai_feature, "collect_weekly_report", lambda *args: DATA), \
                 patch.object(ai_feature, "ask_ollama", answer):
             await ai_feature.report.callback(ctx)
         self.assertIn("よく頑張りました", ctx.messages[0]["embed"].description)
 
         ctx = _Context()
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": None):
+        with patch.object(ai_feature, "collect_weekly_report", lambda *args: None):
             await ai_feature.report.callback(ctx)
         self.assertIn("まだ週報を作れる", ctx.messages[0]["content"])
 
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportTextCleanupTests(unittest.TestCase):
+    def test_horizontal_rules_are_removed(self):
+        embed = ai_feature.build_weekly_report_embed(
+            DATA, "### 今週の実績\n- よくできた\n\n---\n\n### 今週の課題"
+        )
+        self.assertNotIn("---", embed.description)
+        self.assertIn("### 今週の課題", embed.description)

@@ -29,6 +29,11 @@ CHANNEL_KINDS = {
         config.SG_GLOSSARY_CHANNEL_NAME,
         "text",
     ),
+    "ai_report": (
+        "週間レポートとNotionの通知のテキストチャンネル",
+        config.AI_REPORT_CHANNEL_NAME,
+        "text",
+    ),
 }
 
 

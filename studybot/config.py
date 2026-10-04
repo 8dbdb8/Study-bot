@@ -22,6 +22,7 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 STUDY_VOICE_CHANNEL_NAME = "勉強部屋"
 STUDY_LOG_CHANNEL_NAME = "勉強ログ"
 SG_GLOSSARY_CHANNEL_NAME = "SG用語集"
+AI_REPORT_CHANNEL_NAME = "ai-report"
 
 SG_GLOSSARY_CATEGORIES = (
     "セキュリティ",
@@ -66,6 +67,11 @@ DIGEST_CATCH_UP_UNTIL_HOUR = 22
 # 週間レポートを自動で送る曜日（0=月曜 … 6=日曜）と時刻
 WEEKLY_REPORT_WEEKDAY = 6
 WEEKLY_REPORT_TIME = time(21, 0)
+
+# Notion への週ページの保存（日曜のうちの勉強まで入るよう、日付が変わる直前）
+NOTION_SAVE_TIME = time(23, 59)
+# 保存時刻にBotが止まっていたら、翌朝この時刻までに前の週の分を保存する
+NOTION_CATCH_UP_UNTIL_HOUR = 12
 
 # Notion への週間レポートの保存（両方そろったときだけ動く）
 NOTION_TOKEN = os.getenv("NOTION_TOKEN") or None

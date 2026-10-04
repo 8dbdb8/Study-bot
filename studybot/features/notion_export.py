@@ -281,10 +281,8 @@ async def export_weekly_report(client, user_id, data, answer, ai_error, today):
     return url
 
 
-async def save_weekly_report_to_notion(user_id, data, answer, ai_error, today):
-    """Discord に添える1行（保存先のリンクか、失敗の理由）。未設定なら None。"""
-    if not is_notion_configured():
-        return None
+async def try_save_weekly_report(user_id, data, answer, ai_error, today):
+    """Notion に保存して (URL, None)。失敗したら (None, 理由)。"""
     try:
         async with aiohttp.ClientSession(timeout=REQUEST_TIMEOUT) as session:
             url = await export_weekly_report(
@@ -293,9 +291,21 @@ async def save_weekly_report_to_notion(user_id, data, answer, ai_error, today):
             )
     except NotionError as error:
         print(f"[notion] 保存に失敗: {error}")
-        return f"⚠️ Notionへの保存に失敗しました：{error.friendly()}"
+        return None, error.friendly()
     except (aiohttp.ClientError, asyncio.TimeoutError) as error:
         print(f"[notion] 接続に失敗: {error!r}")
-        return "⚠️ Notionに接続できず、保存できませんでした"
+        return None, "Notionに接続できませんでした"
+    return url or "", None
+
+
+async def save_weekly_report_to_notion(user_id, data, answer, ai_error, today):
+    """Discord に添える1行（保存先のリンクか、失敗の理由）。未設定なら None。"""
+    if not is_notion_configured():
+        return None
+    url, error = await try_save_weekly_report(
+        user_id, data, answer, ai_error, today
+    )
+    if error:
+        return f"⚠️ Notionへの保存に失敗しました：{error}"
     return f"📝 Notionにも保存しました：{url}" if url else "📝 Notionにも保存しました"
 

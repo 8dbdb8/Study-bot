@@ -138,8 +138,9 @@ def get_today_total(user_id):
     return total_seconds
 
 
-def get_week_total(user_id):
-    now = datetime.now(JST)
+def get_week_total(user_id, today=None):
+    """today を含む週（月曜〜today）の日ごとの勉強時間。省略すると今日。"""
+    now = today or datetime.now(JST)
 
     monday = now - timedelta(
         days=now.weekday()
@@ -444,9 +445,10 @@ def get_category_status(
 
 def get_week_analysis_status(
     user_id,
-    qualification="SG"
+    qualification="SG",
+    today=None,
 ):
-    now = datetime.now(JST)
+    now = today or datetime.now(JST)
 
     monday = now - timedelta(
         days=now.weekday()

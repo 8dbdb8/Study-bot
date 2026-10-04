@@ -105,7 +105,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
             field.name: field.value
             for field in setup_feature.build_setup_embed(self.guild).fields
         }
-        self.assertEqual(len(fields), 3)
+        self.assertEqual(len(fields), 4)
         values = list(fields.values())
         self.assertIn("<#10>（名前「勉強部屋」で自動検出）", values)
         self.assertIn("<#21>（設定済み）", values)
@@ -119,7 +119,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             [select.kind for select in selects],
-            ["study_voice", "study_log", "glossary"],
+            ["study_voice", "study_log", "glossary", "ai_report"],
         )
         interaction = SimpleNamespace(
             guild=self.guild, user=SimpleNamespace(id=5), response=_Response()

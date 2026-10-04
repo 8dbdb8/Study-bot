@@ -110,6 +110,7 @@ def create_bot():
             bot.add_view(exam_result.ExamResultView())
             digest.daily_digest_loop.start(bot)
             weekly_report.weekly_report_loop.start(bot)
+            weekly_report.notion_save_loop.start(bot)
             exam_result.exam_result_loop.start(bot)
             started = True
 
@@ -118,6 +119,9 @@ def create_bot():
             await digest.send_daily_digests(bot, now)
         if weekly_report.is_weekly_report_due(now):
             await weekly_report.send_weekly_reports(bot, now)
+        notion_week = weekly_report.notion_save_week_day(now)
+        if notion_week is not None:
+            await weekly_report.save_weeks_to_notion(bot, notion_week, now)
         if exam_result.is_result_prompt_due(now):
             await exam_result.send_exam_result_prompts(bot, now)
 

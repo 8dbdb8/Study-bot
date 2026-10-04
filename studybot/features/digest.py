@@ -198,11 +198,16 @@ def final_stretch_focus(weak):
     return focus
 
 
-async def find_home_channel(bot, user_id):
-    """その人が最近勉強したサーバーの勉強ログチャンネル。送れなければ None。"""
+async def find_home_channel(bot, user_id, kind="study_log"):
+    """その人が最近勉強したサーバーのチャンネル。送れなければ None。
+
+    kind のチャンネル（例：ai_report）がなければ、勉強ログに送る。
+    """
     guild_id = get_home_guild_id(config.DB_PATH, user_id)
     guild = bot.get_guild(guild_id) if guild_id else None
-    channel = find_channel(guild, "study_log")
+    channel = find_channel(guild, kind)
+    if channel is None and kind != "study_log":
+        channel = find_channel(guild, "study_log")
     if channel is None:
         print(f"[notify] 送信先が見つかりません: user={user_id}")
         return None

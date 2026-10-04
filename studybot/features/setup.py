@@ -1,4 +1,4 @@
-"""/setup：Botが使うチャンネル（勉強部屋・勉強ログ・SG用語集）を選ぶ。"""
+"""/setup：Botが使うチャンネル（勉強部屋・勉強ログ・SG用語集・ai-report）を選ぶ。"""
 
 import discord
 from discord import app_commands
@@ -83,7 +83,7 @@ class SetupView(discord.ui.View):
     @discord.ui.button(
         label="名前で探す設定に戻す",
         style=discord.ButtonStyle.secondary,
-        row=3,
+        row=4,
     )
     async def reset_button(self, interaction, button):
         for kind in CHANNEL_KINDS:
@@ -97,7 +97,7 @@ class SetupView(discord.ui.View):
 
 @app_commands.command(
     name="setup",
-    description="StudyBotが使うチャンネル（勉強部屋・勉強ログ・SG用語集）を選ぶ",
+    description="StudyBotが使うチャンネル（勉強部屋・勉強ログ・用語集・ai-report）を選ぶ",
 )
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)

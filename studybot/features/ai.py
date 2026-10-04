@@ -160,9 +160,9 @@ async def next_study(ctx):
             )
 
 
-def collect_weekly_report(user_id, qualification="SG"):
-    """今週（月曜〜今日）の集計。週報にできる記録がなければ None。"""
-    week_rows = get_week_total(user_id)
+def collect_weekly_report(user_id, qualification="SG", today=None):
+    """today を含む週（月曜〜today）の集計。週報にできる記録がなければ None。"""
+    week_rows = get_week_total(user_id, today)
     total_seconds = sum(seconds for _, seconds in week_rows)
 
     daily_lines = []
@@ -175,7 +175,7 @@ def collect_weekly_report(user_id, qualification="SG"):
         )
     daily_text = "\n".join(daily_lines) if daily_lines else "記録なし"
 
-    report_status = get_week_analysis_status(user_id, qualification)
+    report_status = get_week_analysis_status(user_id, qualification, today)
     total_questions = report_status["total_questions"]
     average_score = report_status["average_score"]
     log_count = report_status["log_count"]
@@ -300,7 +300,11 @@ REPORT_TEXT_LIMIT = 3900
 
 def build_weekly_report_embed(data, answer=None, ai_error=None):
     if answer:
-        description = answer.strip()
+        # 「---」の区切り線は Embed ではそのまま文字で出るので消す
+        description = "\n".join(
+            line for line in answer.strip().splitlines()
+            if line.strip() not in ("---", "***", "___")
+        )
         if len(description) > REPORT_TEXT_LIMIT:
             description = description[:REPORT_TEXT_LIMIT].rstrip() + "\n…（長いため省略）"
     else:
@@ -328,13 +332,14 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
     return embed
 
 
-async def create_weekly_report(user_id):
-    """今週の週報の (集計, AIの文章, AIのエラー)。記録がなければ None。
+async def create_weekly_report(user_id, today=None):
+    """週報の (集計, AIの文章, AIのエラー)。記録がなければ None。
 
-    AIが使えないときは文章が None になり、数字だけで週報を作れる。
+    today を含む週（省略すると今週）。AIが使えないときは文章が None になり、
+    数字だけで週報を作れる。
     """
     data = collect_weekly_report(
-        user_id, current_qualification(config.DB_PATH).code
+        user_id, current_qualification(config.DB_PATH).code, today
     )
     if data is None:
         return None
