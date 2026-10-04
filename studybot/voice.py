@@ -22,6 +22,8 @@ from studybot.forms import (
     open_quick_log,
 )
 from studybot.checklist import checklist_status, checklist_summary, format_checklist
+from studybot.features.badges import announce_new_badges
+from studybot.features.notes import open_note_modal
 from studybot.habits import format_goal_progress, get_focus_sets, goal_for_day
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
@@ -203,6 +205,14 @@ class VCActionView(discord.ui.View):
         )
         await respond_private(interaction, message, view)
 
+    @discord.ui.button(
+        label="ひとこと",
+        style=discord.ButtonStyle.secondary,
+        custom_id="studybot:vc:note",
+    )
+    async def note_button(self, interaction, button):
+        await open_note_modal(interaction)
+
 
 # ============================================================
 # VC入退室
@@ -352,6 +362,7 @@ async def on_voice_state_update(
             ),
             view=VCActionView(),
         )
+        await announce_new_badges(member.guild, member.id)
 
 
 def build_study_end_extras(user_id, today, today_seconds):

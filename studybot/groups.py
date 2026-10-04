@@ -17,7 +17,7 @@ HELP_COMMAND_ORDER = (
     "review", "time", "plan", "ai", "data", "setup", "help",
 )
 QUALIFICATION_SUBCOMMAND_ORDER = (
-    "log", "b", "mock", "progress", "chart", "status", "glossary",
+    "log", "b", "mock", "progress", "chart", "status", "glossary", "quiz",
 )
 HELP_SUBCOMMAND_ORDER = {
     **{
@@ -25,7 +25,9 @@ HELP_SUBCOMMAND_ORDER = {
         for qualification in QUALIFICATIONS
     },
     "review": ("add", "list", "start", "answer"),
-    "time": ("today", "week", "chart", "calendar", "focus", "logs"),
+    "time": (
+        "today", "week", "chart", "calendar", "focus", "note", "badges", "logs",
+    ),
     "plan": ("new", "status", "exam", "goal", "notify", "roadmap"),
     "ai": ("today", "next", "report"),
 }

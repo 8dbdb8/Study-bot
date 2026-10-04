@@ -33,6 +33,7 @@ from studybot.embeds import build_digest_embed, build_plan_status_embed
 from studybot.exam_prep import get_exam_prep
 from studybot.exam_results import FINAL_STRETCH_DAYS
 from studybot.habits import format_goal_progress, goal_for_day
+from studybot.pace import build_pace_lines
 from studybot.scoring import has_recent_mock, predict_score, prediction_summary
 from studybot.exam_schedule import format_exam_countdown
 from studybot.features.review import build_review_session
@@ -226,8 +227,11 @@ def exam_day_lines(user_id, target):
 
 
 def digest_extra_lines(user_id, qualification, today):
-    """学習メニューの本文に足す行（予想得点・今日の目標）。"""
-    lines = []
+    """学習メニューの本文に足す行（ペース・予想得点・今日の目標）。"""
+    lines = build_pace_lines(
+        config.DB_PATH, user_id, qualification.code, today,
+        get_current_exam_target(user_id)["exam_on"],
+    )
     summary = prediction_summary(
         predict_score(config.DB_PATH, user_id, qualification, today),
         qualification,

@@ -17,6 +17,7 @@ from discord import app_commands
 from studybot import config
 from studybot.channels import find_channel, is_channel
 from studybot.config import JST
+from studybot.features.badges import announce_new_badges
 from studybot.groups import time_group
 from studybot.habits import (
     add_focus_set,
@@ -97,6 +98,7 @@ async def run_focus(channel, user_id, timer):
                         f"今日の集中：{day_sets}セット（{day_minutes}分）",
                         allowed_mentions=_mention(user_id),
                     )
+                await announce_new_badges(getattr(channel, "guild", None), user_id)
                 break
 
             if not late:

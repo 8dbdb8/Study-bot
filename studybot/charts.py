@@ -330,3 +330,43 @@ def render_calendar(daily_seconds, rest_days, end, weeks=13):
         "色が明るいほど長く勉強した日",
     )
     return _to_png(fig)
+
+
+def render_time_of_day_chart(stats, title, subtitle, threshold=60.0):
+    """時間帯ごとの勉強時間（左）と正答率（右）。stats は time_of_day_stats の戻り値。"""
+    names = list(stats)
+    hours = [stats[name]["minutes"] / 60 for name in names]
+    scores = [stats[name]["score"] for name in names]
+    positions = list(range(len(names)))
+
+    fig = _new_figure(height=4.8)
+    left = fig.add_axes([0.07, 0.12, 0.40, 0.62])
+    right = fig.add_axes([0.56, 0.12, 0.40, 0.62])
+    for ax in (left, right):
+        _style_axes(ax)
+        ax.set_xticks(positions)
+        ax.set_xticklabels(names)
+        ax.set_xlim(-0.6, len(names) - 0.4)
+
+    left.bar(positions, hours, width=0.6, color=SERIES_1)
+    left.set_ylim(0, max(max(hours, default=0), 1) * 1.2)
+    left.set_title("勉強時間（時間）", color=TEXT_SECONDARY, fontsize=10, loc="left")
+    for x, value in zip(positions, hours):
+        if value:
+            left.annotate(f"{value:.1f}", xy=(x, value), xytext=(0, 4),
+                          textcoords="offset points", ha="center",
+                          color=TEXT_PRIMARY, fontsize=9)
+
+    right.bar(positions, [score or 0 for score in scores], width=0.6, color=SERIES_2)
+    right.axhline(threshold, color=TEXT_SECONDARY, linewidth=1, linestyle=(0, (4, 4)))
+    right.set_ylim(0, 100)
+    right.set_title("正答率（%）", color=TEXT_SECONDARY, fontsize=10, loc="left")
+    for x, score in zip(positions, scores):
+        label = f"{score:.0f}%" if score is not None else "記録少"
+        right.annotate(label, xy=(x, score or 0), xytext=(0, 4),
+                       textcoords="offset points", ha="center",
+                       color=TEXT_PRIMARY if score is not None else TEXT_SECONDARY,
+                       fontsize=9)
+
+    _title(fig, title, subtitle)
+    return _to_png(fig)

@@ -19,6 +19,7 @@ from studybot.embeds import COLOR_DEFAULT, COLOR_SUCCESS, build_progress_embed
 from studybot.formatting import format_category_label, get_review_candidates
 from studybot.features.review import build_review_session
 from studybot.forms import build_sgb_prompt, build_sglog_prompt, open_quick_log
+from studybot.features.badges import announce_new_badges
 from studybot.groups import QUALIFICATION_GROUPS
 from studybot.qualifications import QUALIFICATIONS
 from studybot.replies import respond_private, send_png, send_private
@@ -31,6 +32,7 @@ from studybot.scoring import (
     prediction_summary,
     save_mock_exam,
 )
+from studybot.speed import SPEED_DAYS, format_speed, speed_summary
 from studybot.sg_features import (
     format_reason_breakdown,
     get_reason_breakdown,
@@ -127,6 +129,14 @@ async def show_progress(ctx, qualification):
         embed.add_field(
             name=f"間違え方（直近{REASON_BREAKDOWN_DAYS}日の誤答）",
             value=reasons, inline=False,
+        )
+    speed = format_speed(
+        speed_summary(config.DB_PATH, ctx.author.id, qualification.code, today),
+        qualification.code,
+    )
+    if speed:
+        embed.add_field(
+            name=f"解く速さ（直近{SPEED_DAYS}日）", value=speed, inline=False
         )
     await ctx.send(embed=embed, view=WeakReviewView(ctx.author.id, qualification))
 
@@ -295,6 +305,7 @@ class MockExamModal(discord.ui.Modal):
         await interaction.followup.send(
             embed=embed, file=discord.File(BytesIO(png), filename="mock.png")
         )
+        await announce_new_badges(interaction.guild, interaction.user.id)
 
 
 async def build_mock_result(user_id, qualification, parts, minutes, score):

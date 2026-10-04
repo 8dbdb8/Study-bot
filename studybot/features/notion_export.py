@@ -119,6 +119,12 @@ def build_page_children(data, answer, ai_error, chart_ids):
         text_block("bulleted_list_item", f"問題数：{data['total_questions']}問"),
         text_block("bulleted_list_item", f"平均正答率：{data['score_text']}"),
     ]
+    if data.get("notes_text"):
+        blocks.append(text_block("heading_2", "今週のひとこと"))
+        blocks.extend(
+            text_block("bulleted_list_item", line.removeprefix("- "))
+            for line in data["notes_text"].splitlines()
+        )
     if chart_ids:
         blocks.append(text_block("heading_2", "グラフ"))
         blocks.extend(image_block(file_id) for file_id in chart_ids)

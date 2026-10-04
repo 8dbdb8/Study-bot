@@ -15,6 +15,7 @@ from studybot.embeds import (
     build_review_list_embed,
     build_review_summary_embed,
 )
+from studybot.features.badges import announce_new_badges
 from studybot.forms import build_mistake_prompt
 from studybot.qualifications import (
     QUALIFICATIONS,
@@ -206,6 +207,7 @@ class ReviewSessionView(discord.ui.View):
             await interaction.response.edit_message(
                 embed=self.embed(), view=None, attachments=[]
             )
+            await announce_new_badges(interaction.guild, self.owner_id)
         else:
             # 前のカードの画像を外し、このカードの画像に差し替える
             await interaction.response.edit_message(

@@ -14,6 +14,8 @@ from studybot.database import init_db
 from studybot.errors import install_error_handlers
 from studybot.features import (
     ai,
+    badges,
+    daily_word,
     data,
     digest,
     exam,
@@ -22,9 +24,11 @@ from studybot.features import (
     focus,
     glossary,
     health,
+    notes,
     plan,
     presence,
     qualification,
+    quiz,
     review,
     setup,
     time,
@@ -38,9 +42,9 @@ from studybot.sg_glossary_history import (
 
 # 読み込むと各サブコマンドが /sg や /plan などのグループに登録される
 FEATURE_MODULES = (
-    ai, data, digest, exam, exam_result, focus, glossary, health, plan,
-    presence,
-    qualification, review, setup, time, weekly_report,
+    ai, badges, daily_word, data, digest, exam, exam_result, focus,
+    glossary, health, notes, plan, presence, qualification, quiz, review,
+    setup, time, weekly_report,
 )
 
 
@@ -116,12 +120,14 @@ def create_bot():
             bot.add_view(digest.DailyDigestView())
             bot.add_view(exam_result.ExamResultView())
             bot.add_view(exam_prep.ExamPrepView())
+            bot.add_view(daily_word.DailyWordView())
             digest.daily_digest_loop.start(bot)
             weekly_report.weekly_report_loop.start(bot)
             weekly_report.notion_save_loop.start(bot)
             exam_result.exam_result_loop.start(bot)
             presence.presence_loop.start(bot)
             health.health_loop.start(bot)
+            daily_word.daily_word_loop.start(bot)
             started = True
             await focus.resume_focus_timers(bot)
             await health.check_and_notify(bot)
@@ -138,6 +144,8 @@ def create_bot():
         if exam_result.is_result_prompt_due(now):
             await exam_result.send_exam_result_prompts(bot, now)
             await exam_prep.send_exam_prep_prompts(bot, now)
+        if daily_word.is_daily_word_due(now):
+            await daily_word.post_daily_words(bot, now)
 
     return bot
 

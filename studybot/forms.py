@@ -17,12 +17,18 @@ from studybot.analysis import (
 )
 from studybot.channels import find_channel
 from studybot.config import JST
+from studybot.features.badges import announce_new_badges
 from studybot.database import (
     delete_study_log_data,
     save_study_analysis,
     save_study_log,
 )
 from studybot.qualifications import SG
+from studybot.speed import (
+    parse_minutes_input,
+    per_question_text,
+    save_practice_minutes,
+)
 from studybot.sg_features import (
     REASON_KINDS,
     add_sg_mistake,
@@ -101,8 +107,15 @@ class SGStudyLogModal(discord.ui.Modal):
         self.add_item(discord.ui.Label(
             text="解いた問題数", component=self.questions_input
         ))
+        self.minutes_input = discord.ui.TextInput(
+            placeholder="例：30（空欄でも可）", required=False, max_length=4,
+        )
         self.add_item(discord.ui.Label(
             text="正答率（%）", component=self.score_input
+        ))
+        self.add_item(discord.ui.Label(
+            text="かかった時間（分・任意）", component=self.minutes_input,
+            description="1問あたりの時間を出して、本番の目安と比べます",
         ))
         self.add_item(discord.ui.Label(
             text="メモ（任意）", component=self.notes_input
@@ -119,6 +132,7 @@ class SGStudyLogModal(discord.ui.Modal):
             score_percent = parse_score_percent_input(
                 self.score_input.value
             )
+            minutes = parse_minutes_input(self.minutes_input.value)
         except ValueError as error:
             await interaction.response.send_message(
                 f"⚠️ {error}",
@@ -172,6 +186,14 @@ class SGStudyLogModal(discord.ui.Modal):
                 message_for_db,
                 analysis
             )
+            speed_text = ""
+            if minutes is not None:
+                save_practice_minutes(
+                    config.DB_PATH, log_message.id, interaction.user.id,
+                    qualification.code, "A", questions, minutes,
+                    log_message.created_at.astimezone(JST).date(),
+                )
+                speed_text = f" / {per_question_text(questions, minutes)}"
             status_data = get_study_status(
                 interaction.user.id,
                 qualification.code
@@ -187,9 +209,10 @@ class SGStudyLogModal(discord.ui.Modal):
             )
             await interaction.followup.send(
                 f"記録しました：{self.category} / "
-                f"{questions}問 / {score_text}%",
+                f"{questions}問 / {score_text}%{speed_text}",
                 ephemeral=True
             )
+            await announce_new_badges(interaction.guild, interaction.user.id)
 
         except Exception as error:
             print(f"❌ sglog 保存エラー: {error}")
@@ -424,6 +447,12 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
         required=False,
         max_length=300,
     )
+    minutes_input = discord.ui.TextInput(
+        label="かかった時間（分・任意）",
+        placeholder="例：25（空欄でも可）",
+        required=False,
+        max_length=4,
+    )
 
     def __init__(self, topic, target_channel, qualification=SG):
         super().__init__(title=f"{qualification.code}科目Bの演習結果")
@@ -442,6 +471,7 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
             reason = (self.reason_input.value or "").strip()
             if correct < questions and not reason:
                 raise ValueError("誤答がある場合は判断を間違えた理由を入力してください。")
+            minutes = parse_minutes_input(self.minutes_input.value)
         except ValueError as error:
             await interaction.response.send_message(
                 str(error), ephemeral=True
@@ -480,6 +510,14 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
                 log_message.created_at.astimezone(JST).date().isoformat(),
                 qualification=self.qualification.code,
             )
+            speed_text = ""
+            if minutes is not None:
+                save_practice_minutes(
+                    config.DB_PATH, log_message.id, interaction.user.id,
+                    self.qualification.code, "B", questions, minutes,
+                    log_message.created_at.astimezone(JST).date(),
+                )
+                speed_text = f" / {per_question_text(questions, minutes)}"
             saved = True
             status_data = get_study_status(
                 interaction.user.id, self.qualification.code
@@ -491,9 +529,10 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
             await interaction.followup.send(
                 f"科目Bを記録しました：{self.topic} / "
                 f"{correct}/{questions}問正解 "
-                f"({analysis['score_percent']:.1f}%)",
+                f"({analysis['score_percent']:.1f}%){speed_text}",
                 ephemeral=True,
             )
+            await announce_new_badges(interaction.guild, interaction.user.id)
         except Exception as error:
             print(f"[{self.qualification.code}科目B] 保存エラー: {error}")
             if saved:

@@ -21,7 +21,7 @@ from studybot.features.notion_export import (
 )
 from studybot.ai_check import checked_answer
 from studybot.groups import ai_group
-from studybot.habits import get_rest_days
+from studybot.habits import format_daily_notes, get_daily_notes, get_rest_days
 from studybot.scoring import predict_score, prediction_summary
 from studybot.sg_features import (
     format_reason_breakdown,
@@ -243,11 +243,17 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
     ))
     if reason_breakdown:
         facts_text += f"\n- 今週登録した誤答の理由：{reason_breakdown}"
+    notes_text = format_daily_notes(get_daily_notes(
+        config.DB_PATH, user_id,
+        date.fromisoformat(report_status["start_date"]),
+        date.fromisoformat(report_status["end_date"]),
+    ))
 
     return {
         "facts_text": facts_text,
         "prediction_text": prediction_text,
         "reason_text": reason_breakdown,
+        "notes_text": notes_text,
         "start_date": report_status["start_date"],
         "end_date": report_status["end_date"],
         "total_seconds": total_seconds,
@@ -326,6 +332,9 @@ def build_weekly_report_prompt(data):
 【確定した事実（Botの集計）】
 {data.get("facts_text", "（なし）")}
 
+【今週のひとこと（本人が書いたメモ）】
+{data.get("notes_text") or "なし"}
+
 【データの読み方に関する重要ルール】
 - 数字や日数は、上の記録と【確定した事実】に書かれたものだけを使う
 - 新しい数字を計算したり、推測で数字を作ったりしない
@@ -397,6 +406,11 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
         embed.add_field(
             name="今週の間違え方", value=data["reason_text"], inline=False
         )
+    if data.get("notes_text"):
+        notes = data["notes_text"]
+        if len(notes) > 1000:
+            notes = notes[:1000].rstrip() + "…"
+        embed.add_field(name="今週のひとこと", value=notes, inline=False)
     return embed
 
 

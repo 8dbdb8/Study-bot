@@ -10,10 +10,14 @@ from studybot.channels import init_channel_settings_table
 from studybot.config import JST
 from studybot.daily_digest import init_daily_digest_tables
 from studybot.exam_results import init_exam_result_tables
+from studybot.badges import init_badge_table
 from studybot.checklist import init_checklist_table
 from studybot.habits import init_habit_tables
 from studybot.health_state import init_health_table
 from studybot.exam_prep import init_exam_prep_table
+from studybot.quiz import init_quiz_table
+from studybot.speed import init_speed_table
+from studybot.daily_word import init_daily_word_table
 from studybot.scoring import init_scoring_tables
 from studybot.notion_store import init_notion_final_table, init_notion_tables
 from studybot.weekly_report import init_weekly_report_tables
@@ -384,6 +388,10 @@ def init_db():
     init_checklist_table(cursor)
     init_health_table(cursor)
     init_exam_prep_table(cursor)
+    init_quiz_table(cursor)
+    init_badge_table(cursor)
+    init_speed_table(cursor)
+    init_daily_word_table(cursor)
     init_channel_settings_table(cursor)
 
     cursor.execute("""

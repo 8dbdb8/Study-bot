@@ -99,7 +99,9 @@ class QuickLogFormTests(unittest.IsolatedAsyncioTestCase):
         payload = modal.to_dict()
         self.assertEqual(payload["title"], "FE過去問道場を記録")
         labels = [c["label"] for c in payload["components"]]
-        self.assertEqual(labels, ["分野", "解いた問題数", "正答率（%）", "メモ（任意）"])
+        self.assertEqual(labels, [
+            "分野", "解いた問題数", "正答率（%）", "かかった時間（分・任意）", "メモ（任意）",
+        ])
         options = payload["components"][0]["component"]["options"]
         self.assertEqual(len(options), 23)
         self.assertEqual(
@@ -109,7 +111,7 @@ class QuickLogFormTests(unittest.IsolatedAsyncioTestCase):
     def test_form_with_fixed_category_has_no_select(self):
         modal = SGStudyLogModal("ネットワーク", object(), SG)
         self.assertIsNone(modal.category_select)
-        self.assertEqual(len(modal.to_dict()["components"]), 3)
+        self.assertEqual(len(modal.to_dict()["components"]), 4)
 
     def test_form_cannot_open_without_channel(self):
         modal, message = build_quick_log_modal(None, SG)

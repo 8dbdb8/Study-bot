@@ -119,6 +119,7 @@ class _Followup:
 def _interaction(user_id=7):
     return SimpleNamespace(
         user=SimpleNamespace(id=user_id),
+        guild=None,
         response=_Response(),
         followup=_Followup(),
     )

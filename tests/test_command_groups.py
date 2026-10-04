@@ -12,11 +12,11 @@ BOT = create_bot()
 
 
 EXPECTED = {
-    "sg": {"log", "b", "mock", "progress", "chart", "status", "glossary"},
+    "sg": {"log", "b", "mock", "progress", "chart", "status", "glossary", "quiz"},
     "fe": {"log", "b", "mock", "progress", "chart", "status"},
     "iryo": {"log", "mock", "progress", "chart", "status"},
     "review": {"add", "list", "start", "answer"},
-    "time": {"today", "week", "chart", "calendar", "focus", "logs"},
+    "time": {"today", "week", "chart", "calendar", "focus", "note", "badges", "logs"},
     "plan": {"new", "status", "exam", "goal", "notify", "roadmap"},
     "ai": {"today", "next", "report"},
 }

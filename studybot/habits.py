@@ -1,4 +1,4 @@
-"""毎日の習慣：1日の目標時間、集中タイマーのセット数、休んだ日。"""
+"""毎日の習慣：1日の目標時間、集中タイマー、ひとこと日記、休んだ日。"""
 
 import sqlite3
 from contextlib import closing
@@ -21,6 +21,15 @@ def init_habit_tables(cursor):
             day TEXT NOT NULL,
             sets INTEGER NOT NULL DEFAULT 0,
             minutes INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (user_id, day)
+        )
+    """)
+    # 今日のひとこと（1日1行のメモ）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS daily_notes (
+            user_id INTEGER NOT NULL,
+            day TEXT NOT NULL,
+            note TEXT NOT NULL,
             PRIMARY KEY (user_id, day)
         )
     """)
@@ -219,6 +228,58 @@ def list_focus_timers(db_path):
         timer["auto"] = bool(timer["auto"])
         timers.append(timer)
     return timers
+
+
+# ------------------------------------------------------------
+# 今日のひとこと
+# ------------------------------------------------------------
+
+NOTE_MAX_LENGTH = 200
+
+
+def save_daily_note(db_path, user_id, day, note):
+    """その日のひとことを保存する（同じ日は上書き）。空にすると消す。"""
+    note = " ".join((note or "").split())
+    if len(note) > NOTE_MAX_LENGTH:
+        raise ValueError(f"ひとことは{NOTE_MAX_LENGTH}文字以内で入力してください。")
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            if note:
+                conn.execute("""
+                    INSERT OR REPLACE INTO daily_notes (user_id, day, note)
+                    VALUES (?, ?, ?)
+                """, (user_id, day.isoformat(), note))
+            else:
+                conn.execute(
+                    "DELETE FROM daily_notes WHERE user_id = ? AND day = ?",
+                    (user_id, day.isoformat()),
+                )
+    return note or None
+
+
+def get_daily_notes(db_path, user_id, start, end):
+    """start〜end のひとこと [(日付, 文), ...]（日付の順）。"""
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            rows = conn.execute("""
+                SELECT day, note FROM daily_notes
+                WHERE user_id = ? AND day BETWEEN ? AND ?
+                ORDER BY day
+            """, (user_id, start.isoformat(), end.isoformat())).fetchall()
+    except sqlite3.Error:
+        rows = []
+    return [(date.fromisoformat(day), note) for day, note in rows]
+
+
+def format_daily_notes(notes):
+    """例：- 月 10/12：科目Bの時間配分がつかめた。なければ None。"""
+    if not notes:
+        return None
+    weekdays = "月火水木金土日"
+    return "\n".join(
+        f"- {weekdays[day.weekday()]} {day.month}/{day.day}：{note}"
+        for day, note in notes
+    )
 
 
 # ------------------------------------------------------------

@@ -6,13 +6,18 @@ from datetime import datetime, timedelta
 from discord import app_commands
 
 from studybot import config
-from studybot.charts import render_calendar, render_study_time_chart
+from studybot.charts import (
+    render_calendar,
+    render_study_time_chart,
+    render_time_of_day_chart,
+)
 from studybot.config import JST
 from studybot.checklist import checklist_status, checklist_summary, format_checklist
 from studybot.embeds import build_today_embed, build_week_embed
 from studybot.groups import time_group
 from studybot.habits import format_goal_progress, goal_for_day, get_rest_days
 from studybot.replies import send_png
+from studybot.time_of_day import MIN_QUESTIONS, best_slot, time_of_day_stats
 from studybot.stats import (
     get_daily_study_seconds,
     get_exam_countdown_line,
@@ -109,15 +114,24 @@ CHART_PERIOD_CHOICES = [
 
 @time_group.command(
     name="chart",
-    description="日ごとの勉強時間をグラフで表示"
+    description="勉強時間をグラフで表示（日ごと・時間帯ごと）"
 )
-@app_commands.describe(days="表示する期間（省略すると4週間）")
-@app_commands.choices(days=CHART_PERIOD_CHOICES)
-async def time_chart(ctx, days: int = 28):
+@app_commands.describe(
+    days="表示する期間（省略すると4週間）",
+    view="日ごと（省略時）か、朝・昼・夜の時間帯ごと",
+)
+@app_commands.choices(days=CHART_PERIOD_CHOICES, view=[
+    app_commands.Choice(name="日ごと", value="daily"),
+    app_commands.Choice(name="時間帯ごと", value="slots"),
+])
+async def time_chart(ctx, days: int = 28, view: str = "daily"):
     if days not in {choice.value for choice in CHART_PERIOD_CHOICES}:
         days = 28
     end = datetime.now(JST).date()
     start = end - timedelta(days=days - 1)
+    if view == "slots":
+        await send_time_of_day_chart(ctx, start, end)
+        return
     daily = get_daily_study_seconds(ctx.author.id, start, end)
     if not daily:
         await ctx.send("この期間の勉強時間の記録がありません。")
@@ -128,6 +142,27 @@ async def time_chart(ctx, days: int = 28):
             render_study_time_chart, daily, start, end
         )
     await send_png(ctx, png, "study_time.png")
+
+
+async def send_time_of_day_chart(ctx, start, end):
+    stats = time_of_day_stats(config.DB_PATH, ctx.author.id, start, end)
+    if not any(slot["minutes"] or slot["questions"] for slot in stats.values()):
+        await ctx.send("この期間の記録がありません。")
+        return
+    best = best_slot(stats)
+    subtitle = (
+        f"正答率がいちばん高いのは {best[0]}（{best[1]:.0f}%）"
+        if best else
+        f"正答率は時間帯ごとに{MIN_QUESTIONS}問以上の記録がそろうと比べられます"
+    )
+    subtitle += " ・ 朝5〜11時 昼11〜17時 夜17〜24時"
+    async with ctx.typing():
+        png = await asyncio.to_thread(
+            render_time_of_day_chart, stats,
+            f"時間帯ごとの勉強（{start.month}/{start.day}〜{end.month}/{end.day}）",
+            subtitle,
+        )
+    await send_png(ctx, png, "time_of_day.png")
 
 
 CALENDAR_PERIOD_CHOICES = [
