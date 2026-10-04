@@ -123,15 +123,7 @@ class QuickLogFormTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(modal)
         self.assertIn("/setup", message)
 
-    async def test_slash_log_opens_form_and_prefix_uses_steps(self):
-        interaction = _interaction()
-        slash_ctx = SimpleNamespace(
-            interaction=interaction, guild=interaction.guild,
-            author=SimpleNamespace(id=7),
-        )
-        await qualification_feature.record_log(slash_ctx, FE)
-        self.assertIs(interaction.response.modals[0].qualification, FE)
-
+    async def test_log_asks_what_was_studied_first(self):
         sent = []
 
         async def send(content=None, **kwargs):
@@ -142,7 +134,8 @@ class QuickLogFormTests(unittest.IsolatedAsyncioTestCase):
             send=send,
         )
         await qualification_feature.record_log(prefix_ctx, FE)
-        self.assertIn("view", sent[0])
+        self.assertIn("何を勉強しましたか", sent[0]["content"])
+        self.assertIs(sent[0]["view"].qualification, FE)
 
 
 class RestDayTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):

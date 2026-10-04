@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 import discord
 
+from studybot import activity_forms
 from studybot import config
 from studybot import database as database_module
 from studybot import forms
@@ -288,14 +289,9 @@ class ButtonTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.custom_id.startswith("studybot:vc:")
                             for item in view.children))
 
-        # 過去問の記録は、分野も選べる1画面のフォームを直接開く
-        interaction = _interaction(7, guild)
-        await view.sglog_button.callback(interaction)
-        modal = interaction.response.modals[0]
-        self.assertIsInstance(modal, forms.SGStudyLogModal)
-        self.assertIsNotNone(modal.category_select)
-
+        # 勉強の記録は、まず過去問道場・復習・単語帳から選ぶ
         for button, expected in (
+            (view.sglog_button, activity_forms.StudyKindView),
             (view.sgb_button, forms.SGBPracticeView),
             (view.mistake_button, forms.SGMistakeView),
         ):

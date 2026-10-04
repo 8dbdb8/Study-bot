@@ -10,6 +10,7 @@ from studybot.channels import init_channel_settings_table
 from studybot.config import JST
 from studybot.daily_digest import init_daily_digest_tables
 from studybot.exam_results import init_exam_result_tables
+from studybot.activities import init_activity_table
 from studybot.badges import init_badge_table
 from studybot.checklist import init_checklist_table
 from studybot.habits import init_habit_tables
@@ -392,6 +393,7 @@ def init_db():
     init_badge_table(cursor)
     init_speed_table(cursor)
     init_daily_word_table(cursor)
+    init_activity_table(cursor)
     init_channel_settings_table(cursor)
 
     cursor.execute("""
@@ -801,6 +803,12 @@ def delete_study_log_data(message_id):
     # 先に分野別結果と解析結果を削除
     cursor.execute("""
         DELETE FROM sg_b_practice
+        WHERE message_id = ?
+    """, (message_id,))
+
+    # 復習・単語帳の記録
+    cursor.execute("""
+        DELETE FROM study_activities
         WHERE message_id = ?
     """, (message_id,))
 

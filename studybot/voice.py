@@ -19,9 +19,9 @@ from studybot.formatting import format_duration
 from studybot.forms import (
     build_mistake_prompt,
     build_sgb_prompt,
-    open_quick_log,
 )
 from studybot.checklist import checklist_status, checklist_summary, format_checklist
+from studybot.activity_forms import open_study_log_prompt
 from studybot.features.badges import announce_new_badges
 from studybot.features.notes import open_note_modal
 from studybot.habits import format_goal_progress, get_focus_sets, goal_for_day
@@ -173,12 +173,13 @@ class VCActionView(discord.ui.View):
     # ボタンは今学習中の資格（ロードマップ）の入力画面を開く。
     # custom_id は再起動前の通知のボタンも動くよう、最初の版のまま
     @discord.ui.button(
-        label="過去問を記録",
+        label="勉強を記録",
         style=discord.ButtonStyle.primary,
         custom_id="studybot:vc:sglog",
     )
     async def sglog_button(self, interaction, button):
-        await open_quick_log(
+        # 過去問道場・復習・単語帳から選んで記録する
+        await open_study_log_prompt(
             interaction, current_qualification(config.DB_PATH)
         )
 

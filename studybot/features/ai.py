@@ -19,6 +19,7 @@ from studybot.features.notion_export import (
     is_notion_configured,
     save_weekly_report_to_notion,
 )
+from studybot.activities import get_activities, summarize_activities
 from studybot.ai_check import checked_answer
 from studybot.groups import ai_group
 from studybot.habits import format_daily_notes, get_daily_notes, get_rest_days
@@ -190,7 +191,13 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
     average_score = report_status["average_score"]
     log_count = report_status["log_count"]
 
-    if total_seconds == 0 and log_count == 0:
+    activities_text = summarize_activities(get_activities(
+        config.DB_PATH, user_id,
+        date.fromisoformat(report_status["start_date"]),
+        date.fromisoformat(report_status["end_date"]),
+        qualification,
+    ))
+    if total_seconds == 0 and log_count == 0 and not activities_text:
         return None
 
     score_text = (
@@ -243,6 +250,8 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
     ))
     if reason_breakdown:
         facts_text += f"\n- 今週登録した誤答の理由：{reason_breakdown}"
+    if activities_text:
+        facts_text += f"\n- 過去問道場のほかの勉強：{activities_text}"
     notes_text = format_daily_notes(get_daily_notes(
         config.DB_PATH, user_id,
         date.fromisoformat(report_status["start_date"]),
@@ -254,6 +263,7 @@ def collect_weekly_report(user_id, qualification="SG", today=None):
         "prediction_text": prediction_text,
         "reason_text": reason_breakdown,
         "notes_text": notes_text,
+        "activities_text": activities_text,
         "start_date": report_status["start_date"],
         "end_date": report_status["end_date"],
         "total_seconds": total_seconds,
@@ -401,6 +411,10 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
     if data.get("prediction_text"):
         embed.add_field(
             name="予想得点（目安）", value=data["prediction_text"], inline=False
+        )
+    if data.get("activities_text"):
+        embed.add_field(
+            name="そのほかの勉強", value=data["activities_text"], inline=False
         )
     if data.get("reason_text"):
         embed.add_field(

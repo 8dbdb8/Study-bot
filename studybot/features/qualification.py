@@ -18,7 +18,8 @@ from studybot.config import JST, REVIEW_SCORE_THRESHOLD
 from studybot.embeds import COLOR_DEFAULT, COLOR_SUCCESS, build_progress_embed
 from studybot.formatting import format_category_label, get_review_candidates
 from studybot.features.review import build_review_session
-from studybot.forms import build_sgb_prompt, build_sglog_prompt, open_quick_log
+from studybot.activity_forms import build_study_log_prompt
+from studybot.forms import build_sgb_prompt, open_quick_log
 from studybot.features.badges import announce_new_badges
 from studybot.groups import QUALIFICATION_GROUPS
 from studybot.qualifications import QUALIFICATIONS
@@ -45,12 +46,8 @@ from studybot.stats import get_daily_scores, get_study_status
 
 
 async def record_log(ctx, qualification):
-    # スラッシュコマンドなら分野・問題数・正答率を1つのフォームで入力する。
-    # !コマンドはフォームを開けないので、分野を選んでからフォームへ進む
-    if getattr(ctx, "interaction", None) is not None:
-        await open_quick_log(ctx.interaction, qualification)
-        return
-    message, view = build_sglog_prompt(ctx.guild, ctx.author.id, qualification)
+    # まず「過去問道場・復習・単語帳」のどれかを選び、選んだものの入力フォームを開く
+    message, view = build_study_log_prompt(ctx.guild, ctx.author.id, qualification)
     await send_private(ctx, message, view)
 
 
@@ -387,7 +384,7 @@ def add_qualification_commands(qualification, group):
     @group.command(
         name="log",
         description=(
-            f"{qualification.practice_source}の結果を記録（分野・問題数・正答率）"
+            f"勉強を記録（{qualification.practice_source}・復習・単語帳）"
         )[:100],
     )
     async def log_command(ctx):
