@@ -2,10 +2,8 @@
 
 from studybot.formatting import format_category_label, get_review_candidates
 from studybot.sg_features import score_from_counts
-from studybot.study_log_parser import (
-    infer_correct_answers,
-    SG_CATEGORY_TO_MAJOR,
-)
+from studybot.qualifications import SG, get_qualification
+from studybot.study_log_parser import infer_correct_answers
 
 
 # ============================================================
@@ -217,17 +215,24 @@ def build_structured_sg_analysis(
     category,
     questions,
     score_percent,
-    notes=None
+    notes=None,
+    qualification="SG",
 ):
-    major_category = SG_CATEGORY_TO_MAJOR[category]
+    """入力画面（/sg log・/fe log など）で入れた結果を解析結果の形にする。"""
+    qualification = get_qualification(qualification) or SG
+    major_category = qualification.category_to_major[category]
     correct_answers = infer_correct_answers(
         questions,
         score_percent
     )
 
     return {
-        "qualification": "SG",
-        "activity": "過去問道場",
+        "qualification": qualification.code,
+        "activity": (
+            "過去問道場"
+            if "過去問道場" in qualification.practice_source
+            else "問題演習"
+        ),
         "exam_section": "A",
         "questions": questions,
         "correct_answers": correct_answers,
@@ -248,7 +253,8 @@ def build_structured_sg_analysis(
 
 
 def build_structured_sg_b_analysis(
-    topic, questions, correct_answers, wrong_reason=None, memo=None
+    topic, questions, correct_answers, wrong_reason=None, memo=None,
+    qualification="SG",
 ):
     score = score_from_counts(correct_answers, questions)
     note_parts = []
@@ -257,7 +263,7 @@ def build_structured_sg_b_analysis(
     if memo and memo.strip():
         note_parts.append(memo.strip())
     return {
-        "qualification": "SG",
+        "qualification": qualification,
         "activity": "科目B演習",
         "exam_section": "B",
         "questions": questions,

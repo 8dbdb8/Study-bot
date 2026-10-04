@@ -6,6 +6,7 @@ from discord import app_commands
 from studybot import config
 from studybot.data_management import (
     apply_edit,
+    category_choices,
     editable_fields,
     FIELDS,
     get_overview,
@@ -14,13 +15,12 @@ from studybot.data_management import (
     list_records,
     prepare_edit,
     prepare_reset,
+    record_qualification,
     RESET_SCOPES,
     reset_user_data,
 )
 from studybot.formatting import format_duration
-from studybot.sg_features import SG_B_TOPICS
 from studybot.stats import get_study_status
-from studybot.study_log_parser import SG_PRACTICE_CATEGORIES
 
 
 class DataOwnerView(discord.ui.View):
@@ -37,9 +37,16 @@ class DataOwnerView(discord.ui.View):
         return False
 
 
+def _qualification_prefix(row):
+    """SG以外の記録には資格名を付ける（例：「FE 」）。"""
+    qualification = row.get("qualification") or "SG"
+    return "" if qualification == "SG" else f"{qualification} "
+
+
 def _data_record_label(kind, row):
     if kind == "log":
         section = "科目B" if row["section"] == "B" else "科目A/旧形式"
+        section = _qualification_prefix(row) + section
         score = row["score_percent"]
         score_text = f"{score:g}%" if score is not None else "正答率なし"
         questions = (
@@ -51,7 +58,10 @@ def _data_record_label(kind, row):
         return f"{row['day']} {format_duration(row['duration_seconds'])}"
     if kind == "mistake":
         state = "完了" if row["completed_on"] else "復習中"
-        return f"{row['category']} / {row['question_ref'][:45]} [{state}]"
+        return (
+            f"{_qualification_prefix(row)}{row['category']} / "
+            f"{row['question_ref'][:45]} [{state}]"
+        )
     return (
         f"{row['day']}開始 {row['weeks']}週 "
         f"{row['weekly_questions']}問/週"
@@ -79,7 +89,7 @@ def _data_home_text(user_id):
         f"（有効{overview['plans']['active_count'] or 0}件）",
     ]
     for kind, title, limit in (
-        ("log", "最近のSGログ", 3),
+        ("log", "最近の学習ログ", 3),
         ("session", "最近の通話", 3),
         ("mistake", "最近の誤答", 2),
         ("plan", "最近の計画", 2),
@@ -262,11 +272,7 @@ class DataFieldSelect(discord.ui.Select):
         view = self.view
         field = self.values[0]
         if field == "category":
-            choices = (
-                SG_B_TOPICS
-                if view.kind == "log" and view.record["exam_section"] == "B"
-                else SG_PRACTICE_CATEGORIES
-            )
+            choices = category_choices(view.record, view.kind)
             await interaction.response.edit_message(
                 content="正しい分野・テーマを選択してください。",
                 view=DataChoiceValueView(
@@ -409,12 +415,13 @@ class DataConfirmEditView(DataOwnerView):
             return
         sg_text = ""
         if self.kind == "log":
-            status = get_study_status(self.owner_id, "SG")
+            code = record_qualification(self.preview["record"]).code
+            status = get_study_status(self.owner_id, code)
             score = status["average_score"]
             sg_text = (
-                f"\nSG累計：{status['total_questions']}問 / "
+                f"\n{code}累計：{status['total_questions']}問 / "
                 f"平均{score:.1f}%" if score is not None else
-                f"\nSG累計：{status['total_questions']}問 / 正答率なし"
+                f"\n{code}累計：{status['total_questions']}問 / 正答率なし"
             )
         await interaction.response.edit_message(
             content=f"DBの記録を修正しました。{sg_text}", view=None,

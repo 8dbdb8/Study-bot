@@ -13,6 +13,11 @@ from studybot.embeds import (
     build_review_summary_embed,
 )
 from studybot.forms import build_mistake_prompt
+from studybot.qualifications import (
+    QUALIFICATIONS,
+    current_qualification,
+    get_qualification,
+)
 from studybot.groups import review_group
 from studybot.replies import send_private
 from studybot.sg_features import get_sg_mistakes, record_sg_mistake_attempt
@@ -23,11 +28,12 @@ from studybot.sg_features import get_sg_mistakes, record_sg_mistake_attempt
 # ============================================================
 
 class ReviewSessionView(discord.ui.View):
-    def __init__(self, owner_id, items, today):
+    def __init__(self, owner_id, items, today, current_code="SG"):
         super().__init__(timeout=900)
         self.owner_id = owner_id
         self.items = items
         self.today = today
+        self.current_code = current_code
         self.index = 0
         self.results = {
             "correct": 0, "wrong": 0, "skipped": 0, "completed": 0,
@@ -49,7 +55,8 @@ class ReviewSessionView(discord.ui.View):
         if self.finished:
             return build_review_summary_embed(self.results)
         return build_review_card_embed(
-            self.items[self.index], self.index + 1, len(self.items)
+            self.items[self.index], self.index + 1, len(self.items),
+            self.current_code,
         )
 
     async def _advance(self, interaction, result):
@@ -101,7 +108,9 @@ def build_review_session(user_id, today=None):
     items = get_sg_mistakes(config.DB_PATH, user_id, today=today, due_only=True)
     if not items:
         return "今日までに復習する問題はありません。", None
-    view = ReviewSessionView(user_id, items, today)
+    view = ReviewSessionView(
+        user_id, items, today, current_qualification(config.DB_PATH).code
+    )
     return view.embed(), view
 
 
@@ -109,8 +118,20 @@ def build_review_session(user_id, today=None):
     name="add",
     description="間違えた問題を復習リストへ登録"
 )
-async def mistake(ctx):
-    message, view = build_mistake_prompt(ctx.author.id)
+@app_commands.describe(qualification="資格（省略すると今学習中の資格）")
+@app_commands.choices(qualification=[
+    app_commands.Choice(name=q.display_name, value=q.code)
+    for q in QUALIFICATIONS
+])
+async def mistake(ctx, qualification: str | None = None):
+    if qualification is None:
+        chosen = current_qualification(config.DB_PATH)
+    else:
+        chosen = get_qualification(qualification)
+        if chosen is None:
+            await send_private(ctx, "資格は候補から選んでください。")
+            return
+    message, view = build_mistake_prompt(ctx.author.id, chosen)
     await send_private(ctx, message, view)
 
 
@@ -134,7 +155,9 @@ async def reviews(ctx, all_items: bool = False):
         await ctx.send(message)
         return
 
-    await ctx.send(embed=build_review_list_embed(items, all_items))
+    await ctx.send(embed=build_review_list_embed(
+        items, all_items, current_qualification(config.DB_PATH).code
+    ))
 
 
 @review_group.command(

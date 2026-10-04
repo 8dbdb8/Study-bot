@@ -4,6 +4,7 @@ from datetime import datetime
 
 import discord
 
+from studybot import config
 from studybot.channels import channel_label, find_channel, is_channel
 from studybot.config import JST
 from studybot.database import (
@@ -20,6 +21,7 @@ from studybot.forms import (
     build_sgb_prompt,
     build_sglog_prompt,
 )
+from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
 from studybot.stats import (
     get_exam_countdown_line,
@@ -164,14 +166,17 @@ class VCActionView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
+    # ボタンは今学習中の資格（ロードマップ）の入力画面を開く。
+    # custom_id は再起動前の通知のボタンも動くよう、最初の版のまま
     @discord.ui.button(
-        label="SG過去問を記録",
+        label="過去問を記録",
         style=discord.ButtonStyle.primary,
         custom_id="studybot:vc:sglog",
     )
     async def sglog_button(self, interaction, button):
         message, view = build_sglog_prompt(
-            interaction.guild, interaction.user.id
+            interaction.guild, interaction.user.id,
+            current_qualification(config.DB_PATH),
         )
         await respond_private(interaction, message, view)
 
@@ -182,7 +187,8 @@ class VCActionView(discord.ui.View):
     )
     async def sgb_button(self, interaction, button):
         message, view = build_sgb_prompt(
-            interaction.guild, interaction.user.id
+            interaction.guild, interaction.user.id,
+            current_qualification(config.DB_PATH),
         )
         await respond_private(interaction, message, view)
 
@@ -192,7 +198,9 @@ class VCActionView(discord.ui.View):
         custom_id="studybot:vc:mistake",
     )
     async def mistake_button(self, interaction, button):
-        message, view = build_mistake_prompt(interaction.user.id)
+        message, view = build_mistake_prompt(
+            interaction.user.id, current_qualification(config.DB_PATH)
+        )
         await respond_private(interaction, message, view)
 
 

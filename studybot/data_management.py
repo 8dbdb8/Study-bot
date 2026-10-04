@@ -6,20 +6,38 @@ from contextlib import contextmanager
 from datetime import date, datetime, timedelta
 
 from studybot.sg_glossary import init_sg_glossary_rating_table
+from studybot.qualifications import QUALIFICATIONS, SG, get_qualification
 from studybot.sg_features import (
-    SG_B_TOPICS, parse_correct_count, score_from_counts, validate_question_ref,
+    parse_correct_count, score_from_counts, validate_question_ref,
 )
 from studybot.study_log_parser import (
-    SG_CATEGORY_TO_MAJOR,
-    SG_PRACTICE_CATEGORIES,
     infer_correct_answers,
     parse_question_count_input,
     parse_score_percent_input,
 )
 
 
+# /data で扱う資格のログ（SG・FE・医療情報技師）。値はコード内の定数だけ
+REGISTERED_QUALIFICATIONS_SQL = "({})".format(", ".join(
+    f"'{qualification.code}'" for qualification in QUALIFICATIONS
+))
+
+
+def record_qualification(record):
+    """記録の資格。資格の列がない古い記録は SG。"""
+    return get_qualification((record or {}).get("qualification") or "SG") or SG
+
+
+def category_choices(record, kind):
+    """分野を直すときの選択肢（その記録の資格の分野、科目Bならテーマ）。"""
+    qualification = record_qualification(record)
+    if kind == "log" and record["exam_section"] == "B":
+        return qualification.b_topics
+    return qualification.category_names
+
+
 KINDS = {
-    "log": "SG学習ログ",
+    "log": "学習ログ（SG・FE・医療情報技師）",
     "session": "通話勉強時間",
     "mistake": "誤答の復習リスト",
     "plan": "週次計画",
@@ -133,11 +151,11 @@ def list_records(db_path, user_id, kind, page=0, page_size=20):
         "log": """
             SELECT l.message_id AS id, l.study_date AS day,
                    a.exam_section AS section, a.questions,
-                   a.score_percent, a.correct_answers
+                   a.score_percent, a.correct_answers, a.qualification
             FROM study_logs AS l JOIN study_log_analysis AS a
                 ON a.message_id = l.message_id
             WHERE l.user_id = ? AND a.user_id = ?
-                AND a.qualification = 'SG'
+                AND a.qualification IN """ + REGISTERED_QUALIFICATIONS_SQL + """
             ORDER BY l.study_date DESC, l.message_id DESC
         """,
         "session": """
@@ -147,7 +165,8 @@ def list_records(db_path, user_id, kind, page=0, page_size=20):
         """,
         "mistake": """
             SELECT id, created_on AS day, category, question_ref,
-                   completed_on FROM sg_mistakes WHERE user_id = ?
+                   completed_on, qualification
+            FROM sg_mistakes WHERE user_id = ?
             ORDER BY id DESC
         """,
         "plan": """
@@ -173,7 +192,7 @@ def _record(conn, user_id, kind, record_id):
             FROM study_logs AS l JOIN study_log_analysis AS a
                 ON a.message_id = l.message_id
             WHERE l.message_id = ? AND l.user_id = ? AND a.user_id = ?
-                AND a.qualification = 'SG'
+                AND a.qualification IN """ + REGISTERED_QUALIFICATIONS_SQL + """
         """, (record_id, user_id, user_id))
         if record is not None:
             record["categories"] = [dict(row) for row in conn.execute("""
@@ -196,7 +215,8 @@ def _record(conn, user_id, kind, record_id):
         """,
         "mistake": """
             SELECT id, category, question_ref, reason, memo,
-                   created_on, next_review_on, success_streak, completed_on
+                   created_on, next_review_on, success_streak, completed_on,
+                   qualification
             FROM sg_mistakes WHERE id = ? AND user_id = ?
         """,
         "plan": """
@@ -248,15 +268,14 @@ def _parse_value(kind, record, field, value):
     if kind == "log" and record["exam_section"] == "B" and record["b"] is None:
         raise ValueError("科目Bの詳細データがないため、この記録は修正できません。")
     if field == "category":
-        options = SG_B_TOPICS if kind == "log" and record["exam_section"] == "B" \
-            else SG_PRACTICE_CATEGORIES
-        if value not in options:
+        if value not in category_choices(record, kind):
             raise ValueError("一覧から分野を選択してください。")
         return value
     if kind == "log":
         if field in ("questions", "score_percent") and record["exam_section"] != "B":
             categories = record["categories"]
-            if len(categories) != 1 or categories[0]["category"] not in SG_PRACTICE_CATEGORIES:
+            names = record_qualification(record).category_names
+            if len(categories) != 1 or categories[0]["category"] not in names:
                 raise ValueError("旧形式のログです。先に正しい分野を選んでください。")
         if field == "questions":
             count = parse_question_count_input(value)
@@ -339,7 +358,10 @@ def _update_log(conn, user_id, record, field, value):
     correct = value if field == "correct_answers" else record["correct_answers"]
     score = value if field == "score_percent" else record["score_percent"]
     if field == "category":
-        major = "科目B" if is_b else SG_CATEGORY_TO_MAJOR[value]
+        major = (
+            "科目B" if is_b
+            else record_qualification(record).category_to_major[value]
+        )
         conn.execute("""
             DELETE FROM study_log_category_results WHERE message_id = ?
         """, (message_id,))

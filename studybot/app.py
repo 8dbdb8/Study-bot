@@ -11,16 +11,18 @@ from discord.ext import commands
 
 from studybot import config, groups, study_log_events, voice
 from studybot.database import init_db
+from studybot.errors import install_error_handlers
 from studybot.features import (
     ai,
     data,
     digest,
     exam,
+    exam_result,
     glossary,
     plan,
+    qualification,
     review,
     setup,
-    sg,
     time,
     weekly_report,
 )
@@ -32,8 +34,8 @@ from studybot.sg_glossary_history import (
 
 # 読み込むと各サブコマンドが /sg や /plan などのグループに登録される
 FEATURE_MODULES = (
-    ai, data, digest, exam, glossary, plan, review, setup, sg, time,
-    weekly_report,
+    ai, data, digest, exam, exam_result, glossary, plan, qualification,
+    review, setup, time, weekly_report,
 )
 
 
@@ -57,6 +59,7 @@ def create_bot():
 
     study_log_events.register(bot)
     voice.register(bot)
+    install_error_handlers(bot)
 
     # 再接続で on_ready が何度呼ばれても、同期と登録は1回だけ
     synced_guild_ids = set()
@@ -104,8 +107,10 @@ def create_bot():
             # 再起動前に送ったメッセージのボタンも押せるようにする
             bot.add_view(voice.VCActionView())
             bot.add_view(digest.DailyDigestView())
+            bot.add_view(exam_result.ExamResultView())
             digest.daily_digest_loop.start(bot)
             weekly_report.weekly_report_loop.start(bot)
+            exam_result.exam_result_loop.start(bot)
             started = True
 
         now = datetime.now(config.JST)
@@ -113,6 +118,8 @@ def create_bot():
             await digest.send_daily_digests(bot, now)
         if weekly_report.is_weekly_report_due(now):
             await weekly_report.send_weekly_reports(bot, now)
+        if exam_result.is_result_prompt_due(now):
+            await exam_result.send_exam_result_prompts(bot, now)
 
     return bot
 

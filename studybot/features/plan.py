@@ -30,7 +30,8 @@ from studybot.formatting import (
 )
 from studybot.groups import plan_group
 from studybot.ollama import ask_ollama
-from studybot.replies import send_private
+from studybot.qualifications import current_qualification
+from studybot.replies import send_long, send_private
 from studybot.sg_features import (
     get_sg_plan_status,
     save_sg_plan,
@@ -124,7 +125,7 @@ async def roadmap(ctx):
 
 @plan_group.command(
     name="new",
-    description="SG合格までの週次学習計画を作成"
+    description="今学習中の資格の、合格までの週次学習計画を作成"
 )
 @app_commands.describe(
     weeks="試験までの残り週数（1〜16週）。省略すると/plan examの試験日から計算",
@@ -165,10 +166,10 @@ async def plan(
         await ctx.send("週目標は1〜500問で指定してください。")
         return
 
-    qualification = "SG"
+    qualification = current_qualification(config.DB_PATH)
     status_data = get_study_status(
         ctx.author.id,
-        qualification
+        qualification.code
     )
     total_questions = status_data["total_questions"]
     average_score = status_data["average_score"]
@@ -221,14 +222,14 @@ async def plan(
     schedule_text = format_plan_schedule(today_date, weeks, exam_on)
 
     prompt = f"""
-情報セキュリティマネジメント（SG）を
+{qualification.display_name}を
 残り{weeks}週間で合格するための学習計画を作成してください。
 {exam_text}
 【各週の期間（Botが計算済み）】
 {schedule_text}
 
 【学習方法】
-情報セキュリティマネジメント過去問道場を中心に学習する。
+{qualification.practice_source}を中心に学習する。
 毎週の基本目標は{weekly_questions}問。
 未達の場合、翌週は不足分のうち最大{weekly_questions // 2}問を上乗せする。
 
@@ -248,7 +249,7 @@ async def plan(
 - 週の見出しは「第1週」のように番号だけにし、日付や曜日は書かない
 - 各週に「基本目標{weekly_questions}問」「学習内容」「確認ポイント」を書く
 - 翌週の上乗せは実績確定後にBotが計算するので、将来の実績を推測しない
-- 過去問道場で実行できる具体的な内容にする
+- {qualification.practice_source}で実行できる具体的な内容にする
 - 分野別記録が少ない場合は、最初に実力測定を入れる
 - 1回の低得点だけで弱点と断定しない
 - 最終週は総合演習と誤答の見直しを中心にする
@@ -274,6 +275,7 @@ async def plan(
         weekly_questions,
         datetime.now(JST).isoformat(),
         today=datetime.now(JST).date(),
+        qualification=qualification.code,
     )
 
     async with ctx.typing():
@@ -282,10 +284,13 @@ async def plan(
 
             update_sg_plan_text(config.DB_PATH, plan_id, answer)
 
-            await ctx.send(
-                f"🗓️ **SG合格まで{weeks}週間の計画**\n"
+            await send_long(
+                ctx,
+                f"🗓️ **{qualification.code}合格まで{weeks}週間の計画**\n"
                 + (
-                    format_exam_countdown(exam_on, today_date, "SG試験")
+                    format_exam_countdown(
+                        exam_on, today_date, qualification.label
+                    )
                     + "\n"
                     if exam_on is not None else ""
                 )
@@ -318,12 +323,14 @@ async def plan(
     description="週次計画の目標と実績を確認"
 )
 async def plan_status(ctx):
+    qualification = current_qualification(config.DB_PATH)
     status_data = get_sg_plan_status(
-        config.DB_PATH, ctx.author.id, today=datetime.now(JST).date()
+        config.DB_PATH, ctx.author.id, today=datetime.now(JST).date(),
+        qualification=qualification.code,
     )
     if status_data is None:
         await ctx.send(
-            "保存済みのSG計画がありません。"
+            f"保存済みの{qualification.code}計画がありません。"
             "`/plan new weeks:6 weekly_questions:30` で作成できます。"
         )
         return

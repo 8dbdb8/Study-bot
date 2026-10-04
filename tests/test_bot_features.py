@@ -140,7 +140,7 @@ class PlanCommandTests(unittest.IsolatedAsyncioTestCase):
             return "計画本文"
 
         def fake_save_plan(db_path, user_id, weeks, weekly_questions,
-                           created_at, today=None):
+                           created_at, today=None, qualification="SG"):
             nonlocal saved_plan
             saved_plan = (user_id, weeks, weekly_questions)
             return 1

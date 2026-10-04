@@ -278,7 +278,7 @@ class PlanFromExamDateTests(unittest.IsolatedAsyncioTestCase):
         self.prompt = None
 
         def fake_save_plan(db_path, user_id, weeks, weekly_questions,
-                           created_at, today=None):
+                           created_at, today=None, qualification="SG"):
             self.saved = (weeks, weekly_questions)
             return 1
 

@@ -222,7 +222,7 @@ class ReportEmbedTests(unittest.IsolatedAsyncioTestCase):
         async def broken(prompt):
             raise RuntimeError("boom")
 
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id: DATA), \
+        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": DATA), \
                 patch.object(ai_feature, "ask_ollama", broken):
             embed = await ai_feature.create_weekly_report_embed(1)
         self.assertIn("AIのコメントは作れませんでした（AIの処理に失敗）", embed.description)
@@ -233,13 +233,13 @@ class ReportEmbedTests(unittest.IsolatedAsyncioTestCase):
             return "### 今週の実績\nよく頑張りました"
 
         ctx = _Context()
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id: DATA), \
+        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": DATA), \
                 patch.object(ai_feature, "ask_ollama", answer):
             await ai_feature.report.callback(ctx)
         self.assertIn("よく頑張りました", ctx.messages[0]["embed"].description)
 
         ctx = _Context()
-        with patch.object(ai_feature, "collect_weekly_report", lambda user_id: None):
+        with patch.object(ai_feature, "collect_weekly_report", lambda user_id, qualification="SG": None):
             await ai_feature.report.callback(ctx)
         self.assertIn("まだ週報を作れる", ctx.messages[0]["content"])
 

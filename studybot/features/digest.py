@@ -22,8 +22,10 @@ from studybot.daily_digest import (
     mark_digest_sent,
 )
 from studybot.embeds import build_digest_embed, build_plan_status_embed
+from studybot.exam_results import FINAL_STRETCH_DAYS
 from studybot.exam_schedule import format_exam_countdown
 from studybot.features.review import build_review_session
+from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
 from studybot.sg_features import (
     get_sg_category_progress,
@@ -68,6 +70,7 @@ class DailyDigestView(discord.ui.View):
         status_data = get_sg_plan_status(
             config.DB_PATH, interaction.user.id,
             today=datetime.now(JST).date(),
+            qualification=current_qualification(config.DB_PATH).code,
         )
         if status_data is None:
             await respond_private(
@@ -81,16 +84,23 @@ class DailyDigestView(discord.ui.View):
 
 
 def build_daily_digest_embed(user_id, today):
+    # 復習はすべての資格の分、計画と弱い分野は今学習中の資格の分
+    qualification = current_qualification(config.DB_PATH)
     due_items = get_sg_mistakes(
         config.DB_PATH, user_id, today=today, due_only=True
     )
 
     plan_week = None
-    plan = get_sg_plan_status(config.DB_PATH, user_id, today=today)
+    plan = get_sg_plan_status(
+        config.DB_PATH, user_id, today=today,
+        qualification=qualification.code,
+    )
     if plan and not plan["completed"] and plan["rows"]:
         plan_week = plan["rows"][-1]
 
-    items, _ = get_sg_category_progress(config.DB_PATH, user_id)
+    items, _ = get_sg_category_progress(
+        config.DB_PATH, user_id, qualification.code
+    )
     weak = [
         (item["category"], item["latest_score"])
         for item in items
@@ -101,10 +111,22 @@ def build_daily_digest_embed(user_id, today):
 
     target = get_current_exam_target(user_id)
     countdown = None
+    final_stretch = None
     if target["exam_on"] is not None and target["exam_on"] >= today:
         countdown = format_exam_countdown(
             target["exam_on"], today, target["label"]
         )
+        days_left = (target["exam_on"] - today).days
+        if days_left <= FINAL_STRETCH_DAYS:
+            final_stretch = {
+                "days_left": days_left,
+                "label": target["label"],
+                "focus": final_stretch_focus(weak),
+                "unfinished": len(get_sg_mistakes(
+                    config.DB_PATH, user_id, today=today, due_only=False,
+                    qualification=qualification.code,
+                )),
+            }
 
     return build_digest_embed(
         today,
@@ -114,7 +136,26 @@ def build_daily_digest_embed(user_id, today):
         plan_week,
         weak,
         REVIEW_SCORE_THRESHOLD,
+        final_stretch,
+        qualification.code,
     )
+
+
+# 直前モードで弱い分野に割り当てる、今日の問題数（弱い順）
+FINAL_STRETCH_QUOTAS = (20, 10, 10)
+
+
+def final_stretch_focus(weak):
+    """直前モードの「今日の重点」。[(項目, 量), ...]"""
+    weakest = sorted(weak, key=lambda item: item[1])[:len(FINAL_STRETCH_QUOTAS)]
+    focus = [
+        (f"{category}（直近 {score:.0f}%）", f"{quota}問")
+        for (category, score), quota in zip(weakest, FINAL_STRETCH_QUOTAS)
+    ]
+    if not focus:
+        focus = [("総合演習（全分野）", "20問")]
+    focus.append(("科目B", "1セット"))
+    return focus
 
 
 async def find_home_channel(bot, user_id):

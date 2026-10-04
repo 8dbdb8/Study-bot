@@ -1,7 +1,10 @@
 import math
+from collections import namedtuple
 import re
 import unicodedata
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+
+from studybot.qualifications import SG, get_qualification
 
 
 SUPPORTED_QUALIFICATIONS = (
@@ -17,22 +20,7 @@ SG_MAJOR_CATEGORIES = (
     "ストラテジ系",
 )
 
-SG_PRACTICE_CATEGORIES = (
-    "情報セキュリティ",
-    "情報セキュリティ管理",
-    "セキュリティ技術評価",
-    "情報セキュリティ対策",
-    "セキュリティ実装技術",
-    "システム構成要素",
-    "データベース",
-    "ネットワーク",
-    "プロジェクトマネジメント",
-    "サービスマネジメント",
-    "システム監査",
-    "システム戦略",
-    "システム企画",
-    "企業活動",
-)
+SG_PRACTICE_CATEGORIES = SG.category_names
 
 SG_CATEGORY_TO_MAJOR = {
     "セキュリティ": "テクノロジ系",
@@ -79,6 +67,30 @@ _CATEGORY_ALIASES = {
     "セキュリティ実装": "セキュリティ実装技術",
     "法律": "法務",
 }
+
+
+# 分野の正規化に使う対応表（資格ごと）
+CategoryMaps = namedtuple(
+    "CategoryMaps", "label category_to_major majors aliases"
+)
+
+# SG は以前からの対応表（順番も含めて）をそのまま使う
+SG_MAPS = CategoryMaps(
+    "SG", SG_CATEGORY_TO_MAJOR, SG_MAJOR_CATEGORIES, _CATEGORY_ALIASES
+)
+
+
+def category_maps_for(qualification_code):
+    """資格の分野対応表。SG・不明・知らない資格は SG の表を使う。"""
+    qualification = get_qualification(qualification_code)
+    if qualification is None or qualification.code == "SG":
+        return SG_MAPS
+    return CategoryMaps(
+        qualification.code,
+        qualification.category_to_major,
+        qualification.majors,
+        qualification.category_aliases,
+    )
 
 
 def parse_question_count_input(value):
@@ -378,13 +390,13 @@ def _canonical_major(value):
     return _MAJOR_ALIASES.get(text)
 
 
-def _canonical_category(value):
+def _canonical_category(value, maps=SG_MAPS):
     text = _normalize_text(value)
 
-    if text in SG_CATEGORY_TO_MAJOR:
+    if text in maps.category_to_major:
         return text
 
-    return _CATEGORY_ALIASES.get(text)
+    return maps.aliases.get(text)
 
 
 def _extract_percent_after_label(content, label):
@@ -401,13 +413,13 @@ def _extract_percent_after_label(content, label):
     return float(match.group("score"))
 
 
-def _find_specific_categories(content):
+def _find_specific_categories(content, maps=SG_MAPS):
     matches = []
     occupied_spans = []
 
     aliases = {
-        **{name: name for name in SG_CATEGORY_TO_MAJOR},
-        **_CATEGORY_ALIASES,
+        **{name: name for name in maps.category_to_major},
+        **maps.aliases,
     }
 
     for label in sorted(aliases, key=len, reverse=True):
@@ -437,7 +449,8 @@ def _find_specific_categories(content):
     return matches
 
 
-def _normalize_category_results(raw_results, content, warnings):
+def _normalize_category_results(raw_results, content, warnings,
+                                maps=SG_MAPS):
     results = {}
 
     if isinstance(raw_results, list):
@@ -448,7 +461,8 @@ def _normalize_category_results(raw_results, content, warnings):
             category = _canonical_category(
                 item.get("category")
                 or item.get("subcategory")
-                or item.get("field")
+                or item.get("field"),
+                maps,
             )
             major = _canonical_major(
                 item.get("major_category")
@@ -456,7 +470,7 @@ def _normalize_category_results(raw_results, content, warnings):
             )
 
             if category:
-                major = SG_CATEGORY_TO_MAJOR[category]
+                major = maps.category_to_major[category]
 
             if not major:
                 continue
@@ -477,10 +491,10 @@ def _normalize_category_results(raw_results, content, warnings):
                 "score_percent": score_percent,
             }
 
-    specific_matches = _find_specific_categories(content)
+    specific_matches = _find_specific_categories(content, maps)
 
     for _, category, score_percent in specific_matches:
-        major = SG_CATEGORY_TO_MAJOR[category]
+        major = maps.category_to_major[category]
         key = (major, category)
         existing = results.get(key, {})
 
@@ -504,7 +518,7 @@ def _normalize_category_results(raw_results, content, warnings):
         if category is not None
     }
 
-    for major in SG_MAJOR_CATEGORIES:
+    for major in maps.majors:
         if major not in content:
             continue
 
@@ -554,11 +568,11 @@ def _normalize_category_results(raw_results, content, warnings):
 
     major_order = {
         name: index
-        for index, name in enumerate(SG_MAJOR_CATEGORIES)
+        for index, name in enumerate(maps.majors)
     }
     category_order = {
         name: index
-        for index, name in enumerate(SG_CATEGORY_TO_MAJOR)
+        for index, name in enumerate(maps.category_to_major)
     }
 
     return sorted(
@@ -573,14 +587,14 @@ def _normalize_category_results(raw_results, content, warnings):
     )
 
 
-def _normalize_weak_points(raw_weak_points, warnings):
+def _normalize_weak_points(raw_weak_points, warnings, maps=SG_MAPS):
     if not isinstance(raw_weak_points, list):
         return []
 
     normalized = []
 
     for value in raw_weak_points:
-        category = _canonical_category(value)
+        category = _canonical_category(value, maps)
         major = _canonical_major(value)
         weak_point = category or major
 
@@ -589,7 +603,7 @@ def _normalize_weak_points(raw_weak_points, warnings):
         elif _text_or_none(value):
             warnings.append(
                 f"弱点「{_normalize_text(value)}」は"
-                "SGの固定分野へ分類できませんでした。"
+                f"{maps.label}の固定分野へ分類できませんでした。"
             )
 
     return normalized
@@ -676,10 +690,18 @@ def normalize_study_analysis(
         warnings,
     )
 
+    # 資格が分からないときは、いま学習中の資格の分野で読む
+    maps = category_maps_for(
+        qualification
+        if qualification != "不明"
+        else _canonical_qualification(current_qualification)
+    )
+
     category_results = _normalize_category_results(
         raw_analysis.get("category_results"),
         content,
         warnings,
+        maps,
     )
 
     if (
@@ -699,6 +721,7 @@ def normalize_study_analysis(
     weak_points = _normalize_weak_points(
         raw_analysis.get("weak_points"),
         warnings,
+        maps,
     )
 
     return {

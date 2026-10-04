@@ -4,6 +4,7 @@ import json
 
 import discord
 
+from studybot import config
 from studybot.analysis import build_analysis_reply
 from studybot.channels import is_channel
 from studybot.database import (
@@ -14,7 +15,9 @@ from studybot.database import (
     set_analysis_reply_message_id,
 )
 from studybot.ollama import analyze_study_log
-from studybot.stats import get_current_qualification, get_study_status
+from studybot.qualifications import current_qualification
+from studybot.replies import safe_reply
+from studybot.stats import get_study_status
 from studybot.study_log_parser import normalize_study_analysis
 
 
@@ -45,18 +48,12 @@ async def process_study_log_message(
     try:
         print("🤖 Ollamaで解析中...")
 
+        # いま学習中の資格の分野でAIに読ませる
+        studying = current_qualification(config.DB_PATH)
         raw_analysis = await analyze_study_log(
-            message.content
+            message.content, studying
         )
-
-        current_qualification = (
-            get_current_qualification()
-        )
-        current_qualification_code = (
-            current_qualification["qualification"]
-            if current_qualification
-            else "SG"
-        )
+        current_qualification_code = studying.code
         analysis = normalize_study_analysis(
             message.content,
             raw_analysis,
@@ -120,15 +117,14 @@ async def process_study_log_message(
 
         # 返信が無い・消された場合は新規作成
         if reply_message is None:
-            reply_message = await message.reply(
-                reply_text,
-                mention_author=False
-            )
+            # 解析中に元の投稿が消された場合は返信しない
+            reply_message = await safe_reply(message, reply_text)
 
-            set_analysis_reply_message_id(
-                message.id,
-                reply_message.id
-            )
+            if reply_message is not None:
+                set_analysis_reply_message_id(
+                    message.id,
+                    reply_message.id
+                )
 
         print("✅ 勉強ログ解析完了")
         print(
@@ -147,11 +143,11 @@ async def process_study_log_message(
         # 編集失敗時は古い解析返信を消さない。
         # 新規投稿時のみエラーを返す。
         if not edited:
-            await message.reply(
+            await safe_reply(
+                message,
                 "⚠️ 勉強ログ自体は保存しましたが、"
                 "AI解析または解析結果の返信に失敗しました。\n"
-                "VS Codeのターミナルを確認してください。",
-                mention_author=False
+                "studybot.log を確認してください。",
             )
 
 

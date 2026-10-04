@@ -6,6 +6,7 @@ import aiohttp
 import discord
 from discord import app_commands
 
+from studybot import config
 from studybot.config import JST
 from studybot.embeds import COLOR_DEFAULT, format_minutes
 from studybot.exam_schedule import WEEKDAY_LABELS
@@ -19,9 +20,12 @@ from studybot.features.notion_export import (
     save_weekly_report_to_notion,
 )
 from studybot.groups import ai_group
+from studybot.qualifications import SG, current_qualification, get_qualification
+from studybot.replies import send_long
 from studybot.ollama import ask_ollama
 from studybot.stats import (
     get_category_status,
+    get_roadmap,
     get_study_status,
     get_today_logs,
     get_today_total,
@@ -35,7 +39,7 @@ from studybot.stats import (
     description="次回の勉強メニューをAIが提案"
 )
 async def next_study(ctx):
-    qualification = "SG"
+    qualification = current_qualification(config.DB_PATH)
 
     total_seconds = get_today_total(
         ctx.author.id
@@ -58,7 +62,7 @@ async def next_study(ctx):
 
     status_data = get_study_status(
         ctx.author.id,
-        qualification
+        qualification.code
     )
 
     total_questions = (
@@ -100,7 +104,7 @@ async def next_study(ctx):
 次回の勉強メニューを作ってください。
 
 【現在の資格】
-情報セキュリティマネジメント（SG）
+{qualification.display_name}
 
 【今日の勉強時間】
 {format_duration(total_seconds)}
@@ -121,7 +125,7 @@ async def next_study(ctx):
 - 1回の結果だけで弱点と断定しない
 - 60%未満の分野は要復習候補として扱う
 - 記録のない実績を作らない
-- ユーザーは過去問道場を中心に勉強している
+- ユーザーは{qualification.practice_source}を中心に勉強している
 
 次回の勉強について、
 具体的なメニューを3項目以内で提案してください。
@@ -141,10 +145,7 @@ async def next_study(ctx):
                 prompt
             )
 
-            await ctx.send(
-                "🎯 **次の勉強メニュー**\n\n"
-                f"{answer}"
-            )
+            await send_long(ctx, f"🎯 **次の勉強メニュー**\n\n{answer}")
 
         except Exception as e:
             print(
@@ -154,7 +155,7 @@ async def next_study(ctx):
             await ctx.send(
                 "⚠️ 次の勉強メニューを"
                 "作成できませんでした。\n"
-                "VS Codeのターミナルを"
+                "studybot.log を"
                 "確認してください。"
             )
 
@@ -230,15 +231,19 @@ def collect_weekly_report(user_id, qualification="SG"):
         "score_text": score_text,
         "category_text": category_text,
         "review_text": review_text,
+        "qualification": qualification,
     }
 
 
 def build_weekly_report_prompt(data):
+    qualification = (
+        get_qualification(data.get("qualification", "SG")) or SG
+    )
     return f"""
 今週の資格勉強について週報を作成してください。
 
 【対象資格】
-情報セキュリティマネジメント（SG）
+{qualification.display_name}
 
 【期間】
 {data["start_date"]} 〜 {data["end_date"]}
@@ -284,7 +289,7 @@ def build_weekly_report_prompt(data):
 
 ### 来週の方針
 AIからの提案として3項目以内で提案する。
-過去問道場を中心に、
+{qualification.practice_source}を中心に、
 要復習候補と総合問題をバランスよく提案する。
 """
 
@@ -306,7 +311,7 @@ def build_weekly_report_embed(data, answer=None, ai_error=None):
         )
 
     embed = discord.Embed(
-        title="SG 週間レポート",
+        title=f"{data.get('qualification', 'SG')} 週間レポート",
         description=description,
         color=COLOR_DEFAULT,
     )
@@ -328,7 +333,9 @@ async def create_weekly_report(user_id):
 
     AIが使えないときは文章が None になり、数字だけで週報を作れる。
     """
-    data = collect_weekly_report(user_id)
+    data = collect_weekly_report(
+        user_id, current_qualification(config.DB_PATH).code
+    )
     if data is None:
         return None
 
@@ -352,7 +359,7 @@ async def create_weekly_report_embed(user_id):
 
 @ai_group.command(
     name="report",
-    description="今週のSG学習レポートをAIが作成"
+    description="今週の学習レポートをAIが作成"
 )
 @app_commands.describe(
     notion="Notionにも週ページとして保存する（.env の設定が必要）"
@@ -411,9 +418,10 @@ async def ai(ctx):
         )
 
     today = datetime.now(JST).strftime("%Y-%m-%d")
+    qualification = current_qualification(config.DB_PATH)
     today_categories = get_category_status(
         ctx.author.id,
-        "SG",
+        qualification.code,
         today,
         today
     )
@@ -431,6 +439,12 @@ async def ai(ctx):
         else "現在はなし"
     )
 
+    roadmap_text = "\n".join(
+        f"{sort_order}. {display_name}"
+        + {"completed": "（合格済み）", "learning": "（学習中）"}.get(status, "")
+        for _, display_name, sort_order, status, _ in get_roadmap()
+    )
+
     prompt = f"""
 今日の学習状況を分析してください。
 
@@ -444,11 +458,9 @@ async def ai(ctx):
 {review_text}
 
 【資格取得ロードマップ】
-1. 情報セキュリティマネジメント（SG）
-2. 基本情報技術者（FE）
-3. 医療情報技師
+{roadmap_text}
 
-現在は情報セキュリティマネジメント（SG）を
+現在は{qualification.display_name}を
 最優先で勉強しています。
 
 以下の3項目に分けて回答してください。
@@ -471,10 +483,7 @@ AIからの提案として、
                 prompt
             )
 
-            await ctx.send(
-                "🤖 **Study Coach**\n\n"
-                f"{answer}"
-            )
+            await send_long(ctx, f"🤖 **Study Coach**\n\n{answer}")
 
         except aiohttp.ClientConnectorError:
             await ctx.send(
@@ -491,6 +500,6 @@ AIからの提案として、
             await ctx.send(
                 "⚠️ AIの処理中に"
                 "エラーが発生しました。\n"
-                "VS Codeのターミナルを"
+                "studybot.log を"
                 "確認してください。"
             )

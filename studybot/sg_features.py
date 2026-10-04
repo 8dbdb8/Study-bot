@@ -5,17 +5,21 @@ from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from urllib.parse import urlparse
 
-from studybot.study_log_parser import SG_PRACTICE_CATEGORIES
+from studybot.qualifications import SG, get_qualification
 
 
-SG_B_TOPICS = (
-    "情報資産管理",
-    "リスクアセスメント",
-    "IT利用のセキュリティ",
-    "委託先管理",
-    "教育・訓練",
-    "その他のケース",
-)
+# 名前は SG 時代のままだが、qualification 列で資格を区別する
+SG_B_TOPICS = SG.b_topics
+
+# 資格ごとに分けるために後から足した列（既存の記録は SG）
+QUALIFICATION_COLUMN_TABLES = ("sg_mistakes", "sg_b_practice", "sg_plans")
+
+
+def _qualification(code):
+    qualification = get_qualification(code)
+    if qualification is None:
+        raise ValueError(f"資格 {code} は登録されていません。")
+    return qualification
 
 
 @contextmanager
@@ -107,6 +111,15 @@ def init_sg_feature_tables(cursor):
         CREATE INDEX IF NOT EXISTS idx_sg_plans_active
         ON sg_plans(user_id, active, id)
     """)
+    for table in QUALIFICATION_COLUMN_TABLES:
+        columns = {
+            row[1] for row in cursor.execute(f"PRAGMA table_info({table})")
+        }
+        if "qualification" not in columns:
+            cursor.execute(
+                f"ALTER TABLE {table} "
+                "ADD COLUMN qualification TEXT NOT NULL DEFAULT 'SG'"
+            )
 
 
 def validate_question_ref(value):
@@ -123,10 +136,15 @@ def validate_question_ref(value):
 
 
 def add_sg_mistake(
-    db_path, user_id, category, question_ref, reason, memo="", today=None
+    db_path, user_id, category, question_ref, reason, memo="", today=None,
+    qualification="SG",
 ):
-    if category not in SG_PRACTICE_CATEGORIES:
-        raise ValueError("SGの14分野から選択してください。")
+    qualification = _qualification(qualification)
+    if category not in qualification.category_names:
+        raise ValueError(
+            f"{qualification.code}の{len(qualification.categories)}分野から"
+            "選択してください。"
+        )
 
     reference = validate_question_ref(question_ref)
     reason = (reason or "").strip()
@@ -142,24 +160,29 @@ def add_sg_mistake(
         cursor = conn.execute("""
             INSERT INTO sg_mistakes (
                 user_id, category, question_ref, reason, memo,
-                created_on, next_review_on
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                created_on, next_review_on, qualification
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             user_id, category, reference, reason, memo or None,
-            today.isoformat(), due.isoformat(),
+            today.isoformat(), due.isoformat(), qualification.code,
         ))
         return cursor.lastrowid, due
 
 
-def get_sg_mistakes(db_path, user_id, today=None, due_only=True):
+def get_sg_mistakes(db_path, user_id, today=None, due_only=True,
+                    qualification=None):
+    """未完了の誤答。qualification を省略するとすべての資格。"""
     today = today or date.today()
     query = """
         SELECT id, category, question_ref, reason, memo,
-               next_review_on, success_streak
+               next_review_on, success_streak, qualification
         FROM sg_mistakes
         WHERE user_id = ? AND completed_on IS NULL
     """
     params = [user_id]
+    if qualification is not None:
+        query += " AND qualification = ?"
+        params.append(qualification)
     if due_only:
         query += " AND next_review_on <= ?"
         params.append(today.isoformat())
@@ -206,32 +229,34 @@ def record_sg_mistake_attempt(
     return {"streak": streak, "completed": completed, "next_review_on": due}
 
 
-def get_sg_category_progress(db_path, user_id):
-    placeholders = ",".join("?" for _ in SG_PRACTICE_CATEGORIES)
+def get_sg_category_progress(db_path, user_id, qualification="SG"):
+    qualification = _qualification(qualification)
+    categories = qualification.category_names
+    placeholders = ",".join("?" for _ in categories)
     with _connect(db_path) as conn:
         rows = conn.execute(f"""
             SELECT c.category, c.questions, c.score_percent, l.study_date
             FROM study_log_category_results AS c
             JOIN study_log_analysis AS a ON a.message_id = c.message_id
             JOIN study_logs AS l ON l.message_id = a.message_id
-            WHERE a.user_id = ? AND a.qualification = 'SG'
+            WHERE a.user_id = ? AND a.qualification = ?
               AND COALESCE(a.exam_section, 'A') = 'A'
               AND c.category IN ({placeholders})
             ORDER BY l.study_date, l.created_at, l.message_id
-        """, (user_id, *SG_PRACTICE_CATEGORIES)).fetchall()
+        """, (user_id, qualification.code, *categories)).fetchall()
 
         unclassified = conn.execute(f"""
             SELECT COALESCE(SUM(a.questions), 0)
             FROM study_log_analysis AS a
             JOIN study_logs AS l ON l.message_id = a.message_id
-            WHERE a.user_id = ? AND a.qualification = 'SG'
+            WHERE a.user_id = ? AND a.qualification = ?
               AND COALESCE(a.exam_section, 'A') = 'A'
               AND NOT EXISTS (
                   SELECT 1 FROM study_log_category_results AS c
                   WHERE c.message_id = a.message_id
                     AND c.category IN ({placeholders})
               )
-        """, (user_id, *SG_PRACTICE_CATEGORIES)).fetchone()[0]
+        """, (user_id, qualification.code, *categories)).fetchone()[0]
 
     progress = {
         category: {
@@ -240,7 +265,7 @@ def get_sg_category_progress(db_path, user_id):
             "latest_score": None,
             "last_study_date": None,
         }
-        for category in SG_PRACTICE_CATEGORIES
+        for category in categories
     }
     for category, questions, score, study_date in rows:
         item = progress[category]
@@ -253,9 +278,10 @@ def get_sg_category_progress(db_path, user_id):
 
 def save_sg_b_practice(
     db_path, message_id, user_id, topic, questions, correct_answers,
-    wrong_reason, memo, practiced_on
+    wrong_reason, memo, practiced_on, qualification="SG",
 ):
-    if topic not in SG_B_TOPICS:
+    qualification = _qualification(qualification)
+    if topic not in qualification.b_topics:
         raise ValueError("科目Bのテーマを選択してください。")
     if not 1 <= questions <= 1000 or not 0 <= correct_answers <= questions:
         raise ValueError("問題数と正解数を確認してください。")
@@ -266,8 +292,8 @@ def save_sg_b_practice(
         conn.execute("""
             INSERT INTO sg_b_practice (
                 message_id, user_id, topic, questions, correct_answers,
-                wrong_reason, memo, practiced_on
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                wrong_reason, memo, practiced_on, qualification
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 topic = excluded.topic,
                 questions = excluded.questions,
@@ -277,28 +303,28 @@ def save_sg_b_practice(
         """, (
             message_id, user_id, topic, questions, correct_answers,
             (wrong_reason or "").strip() or None,
-            (memo or "").strip() or None, practiced_on,
+            (memo or "").strip() or None, practiced_on, qualification.code,
         ))
 
 
-def get_sg_b_summary(db_path, user_id):
+def get_sg_b_summary(db_path, user_id, qualification="SG"):
     with _connect(db_path) as conn:
         count, questions, correct = conn.execute("""
             SELECT COUNT(*), COALESCE(SUM(b.questions), 0),
                    COALESCE(SUM(b.correct_answers), 0)
             FROM sg_b_practice AS b
             JOIN study_logs AS l ON l.message_id = b.message_id
-            WHERE b.user_id = ?
-        """, (user_id,)).fetchone()
+            WHERE b.user_id = ? AND b.qualification = ?
+        """, (user_id, qualification)).fetchone()
         recent = conn.execute("""
             SELECT b.topic, b.questions, b.correct_answers,
                    b.wrong_reason, b.practiced_on
             FROM sg_b_practice AS b
             JOIN study_logs AS l ON l.message_id = b.message_id
-            WHERE b.user_id = ?
+            WHERE b.user_id = ? AND b.qualification = ?
             ORDER BY b.practiced_on DESC, b.message_id DESC
             LIMIT 3
-        """, (user_id,)).fetchall()
+        """, (user_id, qualification)).fetchall()
 
     return {
         "log_count": count,
@@ -310,21 +336,26 @@ def get_sg_b_summary(db_path, user_id):
 
 
 def save_sg_plan(
-    db_path, user_id, weeks, weekly_questions, created_at, today=None
+    db_path, user_id, weeks, weekly_questions, created_at, today=None,
+    qualification="SG",
 ):
     if not 1 <= weeks <= 16 or not 1 <= weekly_questions <= 500:
         raise ValueError("週数は1〜16、週目標は1〜500問で指定してください。")
     today = today or date.today()
     with _connect(db_path) as conn:
-        conn.execute(
-            "UPDATE sg_plans SET active = 0 WHERE user_id = ? AND active = 1",
-            (user_id,),
-        )
+        conn.execute("""
+            UPDATE sg_plans SET active = 0
+            WHERE user_id = ? AND active = 1 AND qualification = ?
+        """, (user_id, qualification))
         cursor = conn.execute("""
             INSERT INTO sg_plans (
-                user_id, start_on, weeks, weekly_questions, created_at
-            ) VALUES (?, ?, ?, ?, ?)
-        """, (user_id, today.isoformat(), weeks, weekly_questions, created_at))
+                user_id, start_on, weeks, weekly_questions, created_at,
+                qualification
+            ) VALUES (?, ?, ?, ?, ?, ?)
+        """, (
+            user_id, today.isoformat(), weeks, weekly_questions, created_at,
+            qualification,
+        ))
         return cursor.lastrowid
 
 
@@ -336,15 +367,15 @@ def update_sg_plan_text(db_path, plan_id, text):
         )
 
 
-def get_sg_plan_status(db_path, user_id, today=None):
+def get_sg_plan_status(db_path, user_id, today=None, qualification="SG"):
     today = today or date.today()
     with _connect(db_path) as conn:
         plan = conn.execute("""
             SELECT id, start_on, weeks, weekly_questions
             FROM sg_plans
-            WHERE user_id = ? AND active = 1
+            WHERE user_id = ? AND active = 1 AND qualification = ?
             ORDER BY id DESC LIMIT 1
-        """, (user_id,)).fetchone()
+        """, (user_id, qualification)).fetchone()
         if plan is None:
             return None
 
@@ -355,10 +386,12 @@ def get_sg_plan_status(db_path, user_id, today=None):
             SELECT l.study_date, COALESCE(SUM(a.questions), 0)
             FROM study_log_analysis AS a
             JOIN study_logs AS l ON l.message_id = a.message_id
-            WHERE a.user_id = ? AND a.qualification = 'SG'
+            WHERE a.user_id = ? AND a.qualification = ?
               AND l.study_date >= ? AND l.study_date < ?
             GROUP BY l.study_date
-        """, (user_id, start.isoformat(), end.isoformat())).fetchall()
+        """, (
+            user_id, qualification, start.isoformat(), end.isoformat(),
+        )).fetchall()
 
     solved_by_day = {date.fromisoformat(day): count for day, count in solved_rows}
     current_index = (today - start).days // 7
@@ -390,4 +423,5 @@ def get_sg_plan_status(db_path, user_id, today=None):
         "current_week": current_index + 1,
         "rows": rows,
         "completed": current_index >= weeks,
+        "qualification": qualification,
     }

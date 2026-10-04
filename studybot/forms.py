@@ -1,4 +1,7 @@
-"""SG過去問・科目B・誤答を入力する画面（選択肢とフォーム）。"""
+"""過去問・科目B・誤答を入力する画面（選択肢とフォーム）。
+
+資格（SG・FE など）を受け取り、その資格の分野やテーマで入力させる。
+"""
 
 from datetime import datetime
 from types import SimpleNamespace
@@ -18,19 +21,25 @@ from studybot.database import (
     save_study_analysis,
     save_study_log,
 )
+from studybot.qualifications import SG
 from studybot.sg_features import (
     add_sg_mistake,
     parse_correct_count,
     save_sg_b_practice,
-    SG_B_TOPICS,
 )
 from studybot.stats import get_study_status
 from studybot.study_log_parser import (
     parse_question_count_input,
     parse_score_percent_input,
-    SG_CATEGORY_TO_MAJOR,
-    SG_PRACTICE_CATEGORIES,
 )
+
+
+def _source_text(qualification):
+    """記録の文面に使う出どころ（例：SG過去問道場、医療情報技師 過去問・問題集）。"""
+    source = qualification.practice_source
+    if source.startswith(qualification.code):
+        return source
+    return f"{qualification.code} {source}"
 
 
 class SGStudyLogModal(
@@ -59,12 +68,14 @@ class SGStudyLogModal(
         max_length=300
     )
 
-    def __init__(self, category, target_channel):
-        super().__init__()
+    def __init__(self, category, target_channel, qualification=SG):
+        super().__init__(title=f"{_source_text(qualification)}ログ"[:45])
         self.category = category
         self.target_channel = target_channel
+        self.qualification = qualification
 
     async def on_submit(self, interaction):
+        qualification = self.qualification
         try:
             questions = parse_question_count_input(
                 self.questions_input.value
@@ -81,7 +92,7 @@ class SGStudyLogModal(
 
         if interaction.guild is None:
             await interaction.response.send_message(
-                "⚠️ SGログはサーバー内で入力してください。",
+                "⚠️ 記録はサーバー内で入力してください。",
                 ephemeral=True
             )
             return
@@ -92,14 +103,14 @@ class SGStudyLogModal(
 
         try:
             log_message = await self.target_channel.send(
-                "SG勉強ログを記録しています..."
+                f"{qualification.code}の勉強ログを記録しています..."
             )
-            major_category = SG_CATEGORY_TO_MAJOR[
+            major_category = qualification.category_to_major[
                 self.category
             ]
             score_text = f"{score_percent:.1f}"
             content = (
-                f"SG過去問道場{questions}問。"
+                f"{_source_text(qualification)}{questions}問。"
                 f"正答率{score_text}%。"
                 f"全て{major_category}の"
                 f"{self.category}分野。"
@@ -116,7 +127,8 @@ class SGStudyLogModal(
                 self.category,
                 questions,
                 score_percent,
-                self.notes_input.value
+                self.notes_input.value,
+                qualification.code,
             )
 
             save_study_log(message_for_db)
@@ -126,7 +138,7 @@ class SGStudyLogModal(
             )
             status_data = get_study_status(
                 interaction.user.id,
-                "SG"
+                qualification.code
             )
             reply_text = build_analysis_reply(
                 analysis,
@@ -150,36 +162,34 @@ class SGStudyLogModal(
                 try:
                     await log_message.edit(
                         content=(
-                            "⚠️ SG勉強ログの保存に失敗しました。"
+                            "⚠️ 勉強ログの保存に失敗しました。"
                         )
                     )
                 except discord.HTTPException:
                     pass
 
             await interaction.followup.send(
-                "⚠️ SG勉強ログを保存できませんでした。\n"
-                "VS Codeのターミナルを確認してください。",
+                "⚠️ 勉強ログを保存できませんでした。\n"
+                "studybot.log を確認してください。",
                 ephemeral=True
             )
 
 
 class SGCategorySelect(discord.ui.Select):
-    def __init__(self, action_label="問題数と正答率を入力"):
+    def __init__(self, action_label="問題数と正答率を入力", qualification=SG):
         self.action_label = action_label
-        security_categories = set(
-            SG_PRACTICE_CATEGORIES[:5]
-        )
+        group_of = {
+            category: group
+            for group, categories in qualification.progress_groups
+            for category in categories
+        }
         options = [
             discord.SelectOption(
                 label=category,
                 value=category,
-                description=(
-                    "セキュリティ"
-                    if category in security_categories
-                    else "その他分野"
-                )
+                description=group_of.get(category),
             )
-            for category in SG_PRACTICE_CATEGORIES
+            for category in qualification.category_names
         ]
 
         super().__init__(
@@ -202,12 +212,13 @@ class SGCategorySelect(discord.ui.Select):
 
 
 class SGStudyLogView(discord.ui.View):
-    def __init__(self, owner_id, target_channel):
+    def __init__(self, owner_id, target_channel, qualification=SG):
         super().__init__(timeout=180)
         self.owner_id = owner_id
         self.target_channel = target_channel
+        self.qualification = qualification
         self.selected_category = None
-        self.add_item(SGCategorySelect())
+        self.add_item(SGCategorySelect(qualification=qualification))
 
     async def interaction_check(self, interaction):
         if interaction.user.id == self.owner_id:
@@ -234,7 +245,8 @@ class SGStudyLogView(discord.ui.View):
         await interaction.response.send_modal(
             SGStudyLogModal(
                 self.selected_category,
-                self.target_channel
+                self.target_channel,
+                self.qualification,
             )
         )
 
@@ -258,9 +270,10 @@ class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
         max_length=500,
     )
 
-    def __init__(self, category):
-        super().__init__()
+    def __init__(self, category, qualification=SG):
+        super().__init__(title=f"{qualification.code}の誤答を登録")
         self.category = category
+        self.qualification = qualification
 
     async def on_submit(self, interaction):
         try:
@@ -272,6 +285,7 @@ class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
                 self.reason_input.value,
                 self.memo_input.value,
                 today=datetime.now(JST).date(),
+                qualification=self.qualification.code,
             )
         except ValueError as error:
             await interaction.response.send_message(
@@ -288,11 +302,12 @@ class SGMistakeModal(discord.ui.Modal, title="SG誤答を登録"):
 
 
 class SGMistakeView(discord.ui.View):
-    def __init__(self, owner_id):
+    def __init__(self, owner_id, qualification=SG):
         super().__init__(timeout=180)
         self.owner_id = owner_id
+        self.qualification = qualification
         self.selected_category = None
-        self.add_item(SGCategorySelect("誤答を入力"))
+        self.add_item(SGCategorySelect("誤答を入力", qualification))
 
     async def interaction_check(self, interaction):
         if interaction.user.id == self.owner_id:
@@ -311,7 +326,7 @@ class SGMistakeView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(
-            SGMistakeModal(self.selected_category)
+            SGMistakeModal(self.selected_category, self.qualification)
         )
 
 
@@ -335,10 +350,11 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
         max_length=300,
     )
 
-    def __init__(self, topic, target_channel):
-        super().__init__()
+    def __init__(self, topic, target_channel, qualification=SG):
+        super().__init__(title=f"{qualification.code}科目Bの演習結果")
         self.topic = topic
         self.target_channel = target_channel
+        self.qualification = qualification
 
     async def on_submit(self, interaction):
         try:
@@ -362,11 +378,12 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
         saved = False
         try:
             log_message = await self.target_channel.send(
-                "SG科目Bの演習結果を記録しています..."
+                f"{self.qualification.code}科目Bの演習結果を記録しています..."
             )
             analysis = build_structured_sg_b_analysis(
                 self.topic, questions, correct,
                 reason, self.memo_input.value,
+                qualification=self.qualification.code,
             )
             message_for_db = SimpleNamespace(
                 id=log_message.id,
@@ -375,7 +392,7 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
                 author=interaction.user,
                 created_at=log_message.created_at,
                 content=(
-                    f"SG科目B {self.topic}を{questions}問中"
+                    f"{self.qualification.code}科目B {self.topic}を{questions}問中"
                     f"{correct}問正解。"
                 ),
             )
@@ -386,9 +403,12 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
                 self.topic, questions, correct, reason,
                 self.memo_input.value,
                 log_message.created_at.astimezone(JST).date().isoformat(),
+                qualification=self.qualification.code,
             )
             saved = True
-            status_data = get_study_status(interaction.user.id, "SG")
+            status_data = get_study_status(
+                interaction.user.id, self.qualification.code
+            )
             await log_message.edit(
                 content=build_analysis_reply(analysis, status_data),
                 allowed_mentions=discord.AllowedMentions.none(),
@@ -400,11 +420,12 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
                 ephemeral=True,
             )
         except Exception as error:
-            print(f"SG科目B 保存エラー: {error}")
+            print(f"[{self.qualification.code}科目B] 保存エラー: {error}")
             if saved:
                 await interaction.followup.send(
                     "科目BはDBに記録済みですが、Discord表示の更新に"
-                    "失敗しました。`/sg progress` で確認してください。",
+                    "失敗しました。"
+                    f"`/{self.qualification.command} progress` で確認してください。",
                     ephemeral=True,
                 )
                 return
@@ -423,12 +444,12 @@ class SGBPracticeModal(discord.ui.Modal, title="SG科目Bの演習結果"):
 
 
 class SGBTopicSelect(discord.ui.Select):
-    def __init__(self):
+    def __init__(self, qualification=SG):
         super().__init__(
             placeholder="科目Bのテーマを選択",
             options=[
                 discord.SelectOption(label=topic, value=topic)
-                for topic in SG_B_TOPICS
+                for topic in qualification.b_topics
             ],
         )
 
@@ -444,12 +465,13 @@ class SGBTopicSelect(discord.ui.Select):
 
 
 class SGBPracticeView(discord.ui.View):
-    def __init__(self, owner_id, target_channel):
+    def __init__(self, owner_id, target_channel, qualification=SG):
         super().__init__(timeout=180)
         self.owner_id = owner_id
         self.target_channel = target_channel
+        self.qualification = qualification
         self.selected_topic = None
-        self.add_item(SGBTopicSelect())
+        self.add_item(SGBTopicSelect(qualification))
 
     async def interaction_check(self, interaction):
         if interaction.user.id == self.owner_id:
@@ -468,7 +490,9 @@ class SGBPracticeView(discord.ui.View):
             )
             return
         await interaction.response.send_modal(
-            SGBPracticeModal(self.selected_topic, self.target_channel)
+            SGBPracticeModal(
+                self.selected_topic, self.target_channel, self.qualification
+            )
         )
 
 
@@ -491,27 +515,36 @@ LOG_CHANNEL_MISSING_TEXT = (
 )
 
 
-def build_sglog_prompt(guild, user_id):
+def build_sglog_prompt(guild, user_id, qualification=SG):
     """(案内文, View) を返す。入力できないときは View が None。"""
     if guild is None:
-        return "SGログはサーバー内で入力してください。", None
+        return "記録はサーバー内で入力してください。", None
     target_channel = find_channel(guild, "study_log")
     if target_channel is None:
         return LOG_CHANNEL_MISSING_TEXT, None
-    return SGLOG_PROMPT_TEXT, SGStudyLogView(user_id, target_channel)
+    return (
+        f"【{qualification.display_name}】\n" + SGLOG_PROMPT_TEXT,
+        SGStudyLogView(user_id, target_channel, qualification),
+    )
 
 
-def build_sgb_prompt(guild, user_id):
+def build_sgb_prompt(guild, user_id, qualification=SG):
+    if not qualification.has_part_b:
+        return f"{qualification.display_name}には科目Bがありません。", None
     if guild is None:
         return "サーバー内で入力してください。", None
     target_channel = find_channel(guild, "study_log")
     if target_channel is None:
         return LOG_CHANNEL_MISSING_TEXT, None
     return (
-        "科目Bで取り組んだケースのテーマを選択してください。",
-        SGBPracticeView(user_id, target_channel),
+        f"【{qualification.display_name}】\n"
+        "科目Bで取り組んだテーマを選択してください。",
+        SGBPracticeView(user_id, target_channel, qualification),
     )
 
 
-def build_mistake_prompt(user_id):
-    return "間違えた問題の分野を選択してください。", SGMistakeView(user_id)
+def build_mistake_prompt(user_id, qualification=SG):
+    return (
+        f"【{qualification.display_name}】\n間違えた問題の分野を選択してください。",
+        SGMistakeView(user_id, qualification),
+    )

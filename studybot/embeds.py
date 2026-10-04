@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import discord
 
 from studybot.exam_schedule import WEEKDAY_LABELS
+from studybot.qualifications import SG
 
 
 COLOR_DEFAULT = 0x4752C4
@@ -150,23 +151,27 @@ def _progress_line(item, threshold):
     )
 
 
-def build_progress_embed(items, unclassified, b_summary, threshold=60.0):
+def build_progress_embed(items, unclassified, b_summary, threshold=60.0,
+                         qualification=None):
+    """分野ごとの進捗。見出しのまとめ方は資格の progress_groups に従う。"""
+    qualification = qualification or SG
     total = sum(item["questions"] for item in items) + unclassified
     embed = discord.Embed(
-        title="SG 科目A・14分野の進捗",
+        title=qualification.section_a_title,
         description=f"累計 **{total}問**（バーは直近の正答率）",
         color=COLOR_DEFAULT,
     )
-    embed.add_field(
-        name="セキュリティ",
-        value=_clip("\n".join(_progress_line(i, threshold) for i in items[:5])),
-        inline=False,
-    )
-    embed.add_field(
-        name="その他分野",
-        value=_clip("\n".join(_progress_line(i, threshold) for i in items[5:])),
-        inline=False,
-    )
+    by_category = {item["category"]: item for item in items}
+    for group, categories in qualification.progress_groups:
+        lines = [
+            _progress_line(by_category[category], threshold)
+            for category in categories
+            if category in by_category
+        ]
+        if lines:
+            embed.add_field(
+                name=group, value=_clip("\n".join(lines)), inline=False
+            )
     if unclassified:
         embed.add_field(
             name="分野未特定",
@@ -190,7 +195,8 @@ def build_progress_embed(items, unclassified, b_summary, threshold=60.0):
         b_text = "\n".join(lines)
     else:
         b_text = "まだ記録なし"
-    embed.add_field(name="科目B", value=_clip(b_text), inline=False)
+    if qualification.has_part_b:
+        embed.add_field(name="科目B", value=_clip(b_text), inline=False)
     embed.set_footer(
         text=(
             f"🟠 要復習＝10問以上で直近{threshold:.0f}%未満　"
@@ -206,7 +212,7 @@ def build_progress_embed(items, unclassified, b_summary, threshold=60.0):
 
 def build_plan_status_embed(status_data, countdown=None):
     embed = discord.Embed(
-        title="SG 週次計画の達成状況",
+        title=f"{status_data.get('qualification', 'SG')} 週次計画の達成状況",
         description=(
             f"開始 {status_data['start_on'].isoformat()} ・"
             f"{status_data['weeks']}週間 ・"
@@ -250,11 +256,19 @@ def build_plan_status_embed(status_data, countdown=None):
 # 復習
 # ------------------------------------------------------------
 
+def mistake_label(item, current_code="SG"):
+    """誤答の分野名。今の資格と違う資格の誤答には資格名を付ける（例：SG・ネットワーク）。"""
+    qualification = item.get("qualification") or current_code
+    if qualification == current_code:
+        return item["category"]
+    return f"{qualification}・{item['category']}"
+
+
 def _review_round(item):
     return f"連続正解 {item['success_streak']}/3"
 
 
-def build_review_list_embed(items, all_items=False):
+def build_review_list_embed(items, all_items=False, current_code="SG"):
     embed = discord.Embed(
         title="SG 復習リスト" + ("（すべて）" if all_items else ""),
         description=f"対象 **{len(items)}件**",
@@ -269,7 +283,7 @@ def build_review_list_embed(items, all_items=False):
             value += f"\nメモ：{safe_text(item['memo'], 60)}"
         embed.add_field(
             name=(
-                f"#{item['id']} {item['category']}"
+                f"#{item['id']} {mistake_label(item, current_code)}"
                 f"（{item['next_review_on']} ・{_review_round(item)}）"
             ),
             value=_clip(value),
@@ -285,13 +299,16 @@ def build_review_list_embed(items, all_items=False):
     return embed
 
 
-def build_review_card_embed(item, position, total):
+def build_review_card_embed(item, position, total, current_code="SG"):
     description = f"{safe_text(item['question_ref'], 200)}\n\n"
     description += f"**前回の誤答理由**\n{safe_text(item['reason'], 300)}"
     if item["memo"]:
         description += f"\n\n**メモ**\n{safe_text(item['memo'], 300)}"
     embed = discord.Embed(
-        title=f"復習 {position}/{total} ・ #{item['id']} {item['category']}",
+        title=(
+            f"復習 {position}/{total} ・ #{item['id']} "
+            f"{mistake_label(item, current_code)}"
+        ),
         description=description,
         color=COLOR_DEFAULT,
     )
@@ -319,28 +336,91 @@ def build_review_summary_embed(results):
 # 学習メニュー（平日は夜・土日祝は朝）
 # ------------------------------------------------------------
 
+def _final_stretch_fields(embed, final_stretch):
+    days_left = final_stretch["days_left"]
+    focus_lines = [
+        f"{name}　**{amount}**" for name, amount in final_stretch["focus"]
+    ]
+    embed.add_field(
+        name="今日の重点（弱い分野から）" if days_left else "直前の確認",
+        value=_clip("\n".join(focus_lines)),
+        inline=False,
+    )
+    unfinished = final_stretch["unfinished"]
+    if days_left >= 2:
+        if unfinished:
+            per_day = -(-unfinished // (days_left - 1))
+            value = (
+                f"未完了の誤答 **{unfinished}件** を試験前日までに一巡"
+                f"（1日あたり約{per_day}件）"
+            )
+        else:
+            value = "未完了の誤答はありません。総合演習で仕上げましょう。"
+        embed.add_field(name="仕上げチェック", value=value, inline=False)
+    elif days_left == 1:
+        embed.add_field(
+            name="明日は試験です",
+            value=(
+                "新しい問題より、誤答の見直しと早めの睡眠を優先しましょう。"
+                + (f"（未完了の誤答 {unfinished}件）" if unfinished else "")
+            ),
+            inline=False,
+        )
+    else:
+        embed.add_field(
+            name="試験が終わったら",
+            value="夜20時に結果をたずねるメッセージが届きます。",
+            inline=False,
+        )
+
+
 def build_digest_embed(
     today, countdown, streak, due_items, plan_week=None, weak=(),
-    threshold=60.0,
+    threshold=60.0, final_stretch=None, current_code="SG",
 ):
-    """今日伝えることがなければNoneを返す。"""
-    if not (countdown or due_items or plan_week or weak):
+    """今日伝えることがなければNoneを返す。
+
+    final_stretch は試験直前（14日前〜当日）のときだけ渡す辞書：
+    days_left（残り日数）, label（例：SG試験）, focus（[(項目, 量)]）,
+    unfinished（未完了の誤答の数）。
+    """
+    if not (countdown or due_items or plan_week or weak or final_stretch):
         return None
 
-    embed = discord.Embed(
-        title=(
-            f"{today.month}月{today.day}日"
-            f"（{WEEKDAY_LABELS[today.weekday()]}）の学習メニュー"
-        ),
-        description="\n".join(
-            line for line in (countdown, f"🔥 連続学習 {streak}日") if line
-        ),
-        color=COLOR_ALERT if due_items else COLOR_DEFAULT,
+    exam_day = final_stretch is not None and final_stretch["days_left"] == 0
+    date_text = (
+        f"{today.month}月{today.day}日"
+        f"（{WEEKDAY_LABELS[today.weekday()]}）"
     )
+    if exam_day:
+        title = f"{date_text} 今日は{final_stretch['label']}です"
+        description = (
+            "がんばってください！受験票と本人確認書類を忘れずに。\n"
+            f"🔥 連続学習 {streak}日"
+        )
+    else:
+        title = f"{date_text}の学習メニュー"
+        if final_stretch is not None:
+            title += " ・ 直前モード"
+        description = "\n".join(
+            line for line in (countdown, f"🔥 連続学習 {streak}日") if line
+        )
+
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=COLOR_ALERT if (due_items or final_stretch) else COLOR_DEFAULT,
+    )
+
+    if final_stretch is not None:
+        _final_stretch_fields(embed, final_stretch)
+        if exam_day:
+            embed.set_footer(text="通知は /plan notify でオフにできます")
+            return embed
 
     if due_items:
         lines = [
-            f"`#{item['id']}` **{item['category']}** — "
+            f"`#{item['id']}` **{mistake_label(item, current_code)}** — "
             f"{safe_text(item['question_ref'], 60)}（{_review_round(item)}）"
             for item in due_items[:5]
         ]
@@ -376,7 +456,8 @@ def build_digest_embed(
             inline=False,
         )
 
-    if weak:
+    # 直前モードでは弱い分野を「今日の重点」に出しているので重ねない
+    if weak and final_stretch is None:
         embed.add_field(
             name=f"正答率{threshold:.0f}%未満の分野",
             value=" ・ ".join(f"{category} {score:.0f}%" for category, score in weak),

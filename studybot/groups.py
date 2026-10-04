@@ -1,10 +1,11 @@
-"""コマンドのグループ（/sg・/review・/time・/plan・/ai）と /help。"""
+"""コマンドのグループ（/sg・/fe・/iryo・/review・/time・/plan・/ai）と /help。"""
 
 import discord
 from discord.ext import commands
 
 from studybot.config import STUDY_VOICE_CHANNEL_NAME
 from studybot.embeds import COLOR_DEFAULT
+from studybot.qualifications import QUALIFICATIONS
 
 
 # グループのコマンドは !xxx と /xxx の両方で使える。
@@ -12,10 +13,17 @@ from studybot.embeds import COLOR_DEFAULT
 
 # /help に表示する順番
 HELP_COMMAND_ORDER = (
-    "sg", "review", "time", "plan", "ai", "data", "setup", "help",
+    *(qualification.command for qualification in QUALIFICATIONS),
+    "review", "time", "plan", "ai", "data", "setup", "help",
+)
+QUALIFICATION_SUBCOMMAND_ORDER = (
+    "log", "b", "progress", "chart", "status", "glossary",
 )
 HELP_SUBCOMMAND_ORDER = {
-    "sg": ("log", "b", "progress", "chart", "status", "glossary"),
+    **{
+        qualification.command: QUALIFICATION_SUBCOMMAND_ORDER
+        for qualification in QUALIFICATIONS
+    },
     "review": ("add", "list", "start", "answer"),
     "time": ("today", "week", "chart", "logs"),
     "plan": ("new", "status", "exam", "notify", "roadmap"),
@@ -67,13 +75,26 @@ async def send_group_help(ctx):
     await ctx.send("\n".join(lines))
 
 
-@commands.hybrid_group(
-    name="sg",
-    description="SGの記録・進捗・用語集",
-    invoke_without_command=True,
-)
-async def sg_group(ctx):
-    await send_group_help(ctx)
+def _make_qualification_group(qualification):
+    """資格ごとのグループ（/sg・/fe など）。中身は features/qualification.py。"""
+    async def qualification_group(ctx):
+        await send_group_help(ctx)
+
+    description = f"{qualification.display_name}の記録・進捗"
+    if qualification.code == "SG":
+        description += "・用語集"
+    return commands.hybrid_group(
+        name=qualification.command,
+        description=description,
+        invoke_without_command=True,
+    )(qualification_group)
+
+
+QUALIFICATION_GROUPS = {
+    qualification.code: _make_qualification_group(qualification)
+    for qualification in QUALIFICATIONS
+}
+sg_group = QUALIFICATION_GROUPS["SG"]
 
 
 @commands.hybrid_group(
@@ -126,4 +147,7 @@ async def help_command(ctx):
     await ctx.send(embed=embed, ephemeral=True)
 
 
-ALL_GROUPS = (sg_group, review_group, time_group, plan_group, ai_group)
+ALL_GROUPS = (
+    *QUALIFICATION_GROUPS.values(),
+    review_group, time_group, plan_group, ai_group,
+)

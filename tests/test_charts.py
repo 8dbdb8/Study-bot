@@ -11,7 +11,7 @@ from studybot import config
 from studybot import database as database_module
 from studybot import stats as stats_module
 from studybot.charts import render_score_chart, render_study_time_chart
-from studybot.features import sg as sg_feature
+from studybot.features import qualification as qualification_feature
 from studybot.features import time as time_feature
 
 
@@ -153,16 +153,16 @@ class ChartCommandTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_sg_chart(self):
         ctx = _Context()
-        await sg_feature.sg_chart.callback(ctx, category="存在しない")
+        await qualification_feature.COMMANDS["SG"]["chart"].callback(ctx, category="存在しない")
         self.assertIn("候補から", ctx.messages[0]["content"])
 
-        await sg_feature.sg_chart.callback(ctx)
+        await qualification_feature.COMMANDS["SG"]["chart"].callback(ctx)
         self.assertIn("まだありません", ctx.messages[1]["content"])
 
         self.add_log(1, "2026-10-02", 20, 12, 60.0, categories=[
             ("ネットワーク", 20, 12, 60.0),
         ])
-        await sg_feature.sg_chart.callback(ctx, category="ネットワーク")
+        await qualification_feature.COMMANDS["SG"]["chart"].callback(ctx, category="ネットワーク")
         self.assertEqual(ctx.messages[2]["file"].filename, "sg_score.png")
 
 

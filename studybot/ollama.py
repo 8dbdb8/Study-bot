@@ -5,23 +5,42 @@ import json
 import aiohttp
 
 from studybot.config import OLLAMA_MODEL, OLLAMA_URL
+from studybot.qualifications import SG
 
 
-# ============================================================
-# Ollama: 勉強ログ構造化
-# ============================================================
+# SG のときは以前と同じ分野一覧（過去の記録で使っていた名前も含む）を示す
+SG_PROMPT_CATEGORIES = (
+    "セキュリティ",
+    "情報セキュリティ",
+    "情報セキュリティ管理",
+    "セキュリティ技術評価",
+    "情報セキュリティ対策",
+    "セキュリティ実装技術",
+    "システム構成要素",
+    "データベース",
+    "ネットワーク",
+    "プロジェクトマネジメント",
+    "サービスマネジメント",
+    "システム監査",
+    "法務",
+    "システム戦略",
+    "システム企画",
+    "企業活動",
+)
 
-async def analyze_study_log(content):
-    payload = {
-        "model": OLLAMA_MODEL,
-        "think": False,
-        "stream": False,
-        "format": "json",
 
-        "messages": [
-            {
-                "role": "system",
-                "content": """
+def build_analysis_prompt(qualification=None):
+    """勉強ログを構造化させる指示。分野の一覧はいま学習中の資格のもの。"""
+    qualification = qualification or SG
+    code = qualification.code
+    categories = (
+        SG_PROMPT_CATEGORIES if code == "SG" else qualification.category_names
+    )
+    majors = "\n".join(f"- {major}" for major in qualification.majors)
+    category_lines = "\n".join(f"- {name}" for name in categories)
+    example_category = categories[min(8, len(categories) - 1)]
+    example_major = qualification.category_to_major[example_category]
+    return f"""
 あなたは資格勉強ログを構造化するシステムです。
 
 ユーザーが実際に書いた内容だけを抽出してください。
@@ -34,60 +53,60 @@ FE
 医療情報技師
 不明
 
-SGの分野名は次の固定値だけを使ってください。
+{code}の分野名は次の固定値だけを使ってください。
 
 大分類:
-- テクノロジ系
-- マネジメント系
-- ストラテジ系
+{majors}
 
 中分類:
-- セキュリティ
-- 情報セキュリティ
-- 情報セキュリティ管理
-- セキュリティ技術評価
-- 情報セキュリティ対策
-- セキュリティ実装技術
-- システム構成要素
-- データベース
-- ネットワーク
-- プロジェクトマネジメント
-- サービスマネジメント
-- システム監査
-- 法務
-- システム戦略
-- システム企画
-- 企業活動
+{category_lines}
 
 必ず以下のJSON形式だけを返してください。
 
-{
-  "qualification": "SG",
+{{
+  "qualification": "{code}",
   "activity": "過去問道場",
   "questions": 20,
   "correct_answers": 12,
   "score_percent": null,
   "category_results": [
-    {
-      "major_category": "テクノロジ系",
-      "category": "ネットワーク",
+    {{
+      "major_category": "{example_major}",
+      "category": "{example_category}",
       "questions": null,
       "correct_answers": null,
       "score_percent": 40.0
-    }
+    }}
   ],
   "notes": null
-}
+}}
 
 ルール:
 - 不明な値は null
 - category_results がなければ []
-- SGの分野は上記の固定値以外を作らない
+- {code}の分野は上記の固定値以外を作らない
 - 大分類だけ書かれている場合、category は null
 - 正答率は数値だけにする
 - 問題数は実際に書かれた数だけを使う
 - 正解数は実際に書かれた場合だけを使う
 """
+
+
+# ============================================================
+# Ollama: 勉強ログ構造化
+# ============================================================
+
+async def analyze_study_log(content, qualification=None):
+    payload = {
+        "model": OLLAMA_MODEL,
+        "think": False,
+        "stream": False,
+        "format": "json",
+
+        "messages": [
+            {
+                "role": "system",
+                "content": build_analysis_prompt(qualification)
             },
             {
                 "role": "user",

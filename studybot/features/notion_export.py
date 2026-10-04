@@ -106,6 +106,9 @@ def build_page_children(data, answer, ai_error, chart_ids):
         ),
         text_block("heading_2", "今週の数字"),
         text_block(
+            "bulleted_list_item", f"資格：{data.get('qualification', 'SG')}"
+        ),
+        text_block(
             "bulleted_list_item",
             f"期間：{data['start_date']} 〜 {data['end_date']}",
         ),
@@ -132,7 +135,7 @@ def build_page_children(data, answer, ai_error, chart_ids):
     return blocks
 
 
-def render_weekly_charts(user_id, week_start, today):
+def render_weekly_charts(user_id, week_start, today, qualification="SG"):
     """(ファイル名, PNG) のリスト。記録がないグラフは作らない。"""
     charts = []
     week_end = week_start + timedelta(days=6)
@@ -145,14 +148,14 @@ def render_weekly_charts(user_id, week_start, today):
 
     since = today - timedelta(days=SCORE_CHART_DAYS - 1)
     points = [
-        point for point in get_daily_scores(user_id)
+        point for point in get_daily_scores(user_id, qualification)
         if since <= point[0] <= today
     ]
     if points:
         charts.append((
             "sg_score.png",
             render_score_chart(
-                points, "SG 正答率の推移（直近4週間）",
+                points, f"{qualification} 正答率の推移（直近4週間）",
                 config.REVIEW_SCORE_THRESHOLD,
             ),
         ))
@@ -247,7 +250,8 @@ async def export_weekly_report(client, user_id, data, answer, ai_error, today):
     week_start = date.fromisoformat(data["start_date"])
 
     charts = await asyncio.to_thread(
-        render_weekly_charts, user_id, week_start, today
+        render_weekly_charts, user_id, week_start, today,
+        data.get("qualification", "SG"),
     )
     chart_ids = [
         await client.upload_png(png, filename) for filename, png in charts
