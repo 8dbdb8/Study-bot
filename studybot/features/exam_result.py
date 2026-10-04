@@ -16,6 +16,7 @@ from studybot.config import JST
 from studybot.embeds import COLOR_DEFAULT, COLOR_SUCCESS, format_minutes
 from studybot.exam_results import (
     advance_roadmap,
+    parse_exam_score,
     get_pending_exam,
     get_result_prompt_candidates,
     get_study_summary,
@@ -48,7 +49,8 @@ def build_roadmap_text():
     return "\n".join(lines) or "ロードマップがまだ登録されていません。"
 
 
-def build_pass_embed(user_id, qualification, exam_on, next_qualification):
+def build_pass_embed(user_id, qualification, exam_on, next_qualification,
+                     score=None):
     first_day, study_days, seconds = get_study_summary(
         config.DB_PATH, user_id, exam_on
     )
@@ -56,8 +58,11 @@ def build_pass_embed(user_id, qualification, exam_on, next_qualification):
 
     embed = discord.Embed(
         title=f"{qualification}合格おめでとうございます！",
+        description="この記録は「合格までの記録」として残ります。",
         color=COLOR_SUCCESS,
     )
+    if score is not None:
+        embed.add_field(name="得点", value=f"{score}点")
     if first_day:
         days = (date.fromisoformat(exam_on) - date.fromisoformat(first_day)).days + 1
         embed.add_field(name="学習期間", value=f"{days}日（勉強した日 {study_days}日）")
@@ -107,6 +112,12 @@ class _OwnerView(discord.ui.View):
 
 
 class NextStepView(_OwnerView):
+    def __init__(self, owner_id, next_name=None):
+        super().__init__(owner_id)
+        if next_name:
+            # 例：「基本情報技術者（FE）の試験日を設定」
+            self.next_exam_button.label = f"{next_name}の試験日を設定"[:80]
+
     @discord.ui.button(label="次の試験日を設定", style=discord.ButtonStyle.primary)
     async def next_exam_button(self, interaction, button):
         await self.open_exam_date(interaction)
@@ -134,51 +145,7 @@ class ExamResultView(discord.ui.View):
         super().__init__(timeout=None)
 
     async def _answer(self, interaction, result):
-        user_id = interaction.user.id
-        today = datetime.now(JST).date()
-        pending = get_pending_exam(config.DB_PATH, user_id, today)
-        if pending is None:
-            await respond_private(
-                interaction,
-                "結果を記録する試験が見つかりません"
-                "（すでに記録済みか、試験日が設定されていません）。",
-            )
-            return
-
-        qualification, exam_on = pending
-        if result is None:
-            await interaction.response.edit_message(
-                content=(
-                    interaction.message.content
-                    + "\n→ わかりました。明日の夜20時にもう一度聞きます。"
-                ),
-                view=None,
-            )
-            return
-
-        record_exam_result(
-            config.DB_PATH, user_id, qualification, exam_on, result,
-            datetime.now(JST).isoformat(),
-        )
-        label = "合格" if result == "pass" else "不合格"
-        await interaction.response.edit_message(
-            content=interaction.message.content + f"\n→ {label}を記録しました。",
-            view=None,
-        )
-
-        if result == "pass":
-            next_qualification = advance_roadmap(config.DB_PATH, qualification)
-            await interaction.followup.send(
-                embed=build_pass_embed(
-                    user_id, qualification, exam_on, next_qualification
-                ),
-                view=NextStepView(user_id) if next_qualification else None,
-            )
-        else:
-            await interaction.followup.send(
-                embed=build_fail_embed(qualification),
-                view=RetakeView(user_id),
-            )
+        await answer_exam_result(interaction, result)
 
     @discord.ui.button(
         label="合格した",
@@ -197,6 +164,17 @@ class ExamResultView(discord.ui.View):
         await self._answer(interaction, "fail")
 
     @discord.ui.button(
+        label="スコアを入力",
+        style=discord.ButtonStyle.primary,
+        custom_id="studybot:exam:score",
+    )
+    async def score_button(self, interaction, button):
+        if find_pending_exam(interaction) is None:
+            await respond_private(interaction, NO_PENDING_EXAM_TEXT)
+            return
+        await interaction.response.send_modal(ExamScoreModal())
+
+    @discord.ui.button(
         label="まだ分からない",
         style=discord.ButtonStyle.secondary,
         custom_id="studybot:exam:later",
@@ -204,6 +182,103 @@ class ExamResultView(discord.ui.View):
     async def later_button(self, interaction, button):
         await self._answer(interaction, None)
 
+
+NO_PENDING_EXAM_TEXT = (
+    "結果を記録する試験が見つかりません"
+    "（すでに記録済みか、試験日が設定されていません）。"
+)
+
+
+def find_pending_exam(interaction):
+    return get_pending_exam(
+        config.DB_PATH, interaction.user.id, datetime.now(JST).date()
+    )
+
+
+class ExamScoreModal(discord.ui.Modal):
+    """得点と合否を入力する。"""
+
+    def __init__(self):
+        super().__init__(title="試験の結果を入力")
+        self.score_input = discord.ui.TextInput(
+            placeholder="例：720（分からなければ空欄）",
+            required=False,
+            max_length=4,
+        )
+        self.result_select = discord.ui.Select(
+            placeholder="合否を選択",
+            options=[
+                discord.SelectOption(label="合格", value="pass"),
+                discord.SelectOption(label="不合格", value="fail"),
+            ],
+        )
+        self.add_item(discord.ui.Label(
+            text="得点（1000点満点）", component=self.score_input
+        ))
+        self.add_item(discord.ui.Label(
+            text="合否", component=self.result_select
+        ))
+
+    async def on_submit(self, interaction):
+        try:
+            score = parse_exam_score(self.score_input.value)
+        except ValueError as error:
+            await respond_private(interaction, str(error))
+            return
+        await answer_exam_result(
+            interaction, self.result_select.values[0], score
+        )
+
+
+async def answer_exam_result(interaction, result, score=None):
+    """ボタンかフォームの答えを記録し、合格なら次の資格へ進める。"""
+    user_id = interaction.user.id
+    pending = find_pending_exam(interaction)
+    if pending is None:
+        await respond_private(interaction, NO_PENDING_EXAM_TEXT)
+        return
+
+    qualification, exam_on = pending
+    if result is None:
+        await interaction.response.edit_message(
+            content=(
+                interaction.message.content
+                + "\n→ わかりました。明日の夜20時にもう一度聞きます。"
+            ),
+            view=None,
+        )
+        return
+
+    record_exam_result(
+        config.DB_PATH, user_id, qualification, exam_on, result,
+        datetime.now(JST).isoformat(), score,
+    )
+    label = "合格" if result == "pass" else "不合格"
+    score_text = f"（{score}点）" if score is not None else ""
+    await interaction.response.edit_message(
+        content=(
+            interaction.message.content
+            + f"\n→ {label}{score_text}を記録しました。"
+        ),
+        view=None,
+    )
+
+    if result == "pass":
+        next_qualification = advance_roadmap(config.DB_PATH, qualification)
+        await interaction.followup.send(
+            embed=build_pass_embed(
+                user_id, qualification, exam_on, next_qualification, score
+            ),
+            view=(
+                NextStepView(user_id, next_qualification[1])
+                if next_qualification else None
+            ),
+        )
+    else:
+        await interaction.followup.send(
+            embed=build_fail_embed(qualification),
+            view=RetakeView(user_id),
+        )
 
 async def send_exam_result_prompt(bot, user_id, qualification, exam_on, today):
     channel = await find_home_channel(bot, user_id)

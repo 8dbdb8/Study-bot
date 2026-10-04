@@ -144,7 +144,16 @@ async def help_command(ctx):
         description=body,
         color=COLOR_DEFAULT,
     )
+    embed.add_field(name="はじめての使い方", value=GETTING_STARTED, inline=False)
     await ctx.send(embed=embed, ephemeral=True)
+
+
+GETTING_STARTED = "\n".join((
+    f"**1. 勉強部屋に入る** ― 「{STUDY_VOICE_CHANNEL_NAME}」を出ると時間が自動で記録されます",
+    "**2. 結果を記録** ― 退出通知の `過去問を記録`、または `/sg log`（FEは `/fe log`）",
+    "**3. 間違えた問題** ― `/review add`。学習メニューで復習日をお知らせします",
+    "**4. 進み具合** ― `/sg progress` ・ `/sg chart` ・ `/plan status`",
+))
 
 
 ALL_GROUPS = (

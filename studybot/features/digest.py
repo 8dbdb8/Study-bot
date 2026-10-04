@@ -1,7 +1,7 @@
 """学習メニュー（平日は夜・土日祝は朝）の組み立てと送信。"""
 
 import asyncio
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 
 import discord
 from discord.ext import tasks
@@ -16,19 +16,22 @@ from studybot.config import (
     REVIEW_SCORE_THRESHOLD,
 )
 from studybot.daily_digest import (
+    REST_DAY_INTERVAL_DAYS,
     digest_datetime,
     get_digest_candidates,
     get_home_guild_id,
     mark_digest_sent,
+    take_rest_day,
 )
 from studybot.embeds import build_digest_embed, build_plan_status_embed
 from studybot.exam_results import FINAL_STRETCH_DAYS
 from studybot.exam_schedule import format_exam_countdown
 from studybot.features.review import build_review_session
+from studybot.forms import open_quick_log
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
 from studybot.sg_features import (
-    get_sg_category_progress,
+    get_weak_categories,
     get_sg_mistakes,
     get_sg_plan_status,
 )
@@ -82,6 +85,50 @@ class DailyDigestView(discord.ui.View):
             status_data, get_exam_countdown_line(interaction.user.id)
         ))
 
+    @discord.ui.button(
+        label="弱点の問題を記録",
+        style=discord.ButtonStyle.secondary,
+        custom_id="studybot:digest:log",
+    )
+    async def log_button(self, interaction, button):
+        qualification = current_qualification(config.DB_PATH)
+        await open_quick_log(
+            interaction,
+            qualification,
+            weakest_category(interaction.user.id, qualification),
+        )
+
+    @discord.ui.button(
+        label="今日は休む",
+        style=discord.ButtonStyle.secondary,
+        custom_id="studybot:digest:rest",
+    )
+    async def rest_button(self, interaction, button):
+        today = datetime.now(JST).date()
+        result, day = take_rest_day(config.DB_PATH, interaction.user.id, today)
+        if result == "too_soon":
+            next_day = day + timedelta(days=REST_DAY_INTERVAL_DAYS)
+            message = (
+                f"休みは1週間に1回までです（前回：{day.month}/{day.day}）。"
+                f"次に休めるのは {next_day.month}/{next_day.day} からです。"
+            )
+        else:
+            streak = get_study_streak_safe(interaction.user.id, today)
+            message = (
+                "今日はお休みにしました。ゆっくり休んでください。\n"
+                f"🔥 連続学習 {streak}日は途切れません"
+                "（休みの日は日数に数えません）。"
+            )
+        await respond_private(interaction, message)
+
+
+def weakest_category(user_id, qualification):
+    """直近の正答率が一番低い分野（10問以上解いたもの）。なければ None。"""
+    weak = get_weak_categories(
+        config.DB_PATH, user_id, qualification.code, threshold=None
+    )
+    return weak[0][0] if weak else None
+
 
 def build_daily_digest_embed(user_id, today):
     # 復習はすべての資格の分、計画と弱い分野は今学習中の資格の分
@@ -98,16 +145,9 @@ def build_daily_digest_embed(user_id, today):
     if plan and not plan["completed"] and plan["rows"]:
         plan_week = plan["rows"][-1]
 
-    items, _ = get_sg_category_progress(
-        config.DB_PATH, user_id, qualification.code
+    weak = get_weak_categories(
+        config.DB_PATH, user_id, qualification.code, REVIEW_SCORE_THRESHOLD
     )
-    weak = [
-        (item["category"], item["latest_score"])
-        for item in items
-        if item["questions"] >= 10
-        and item["latest_score"] is not None
-        and item["latest_score"] < REVIEW_SCORE_THRESHOLD
-    ]
 
     target = get_current_exam_target(user_id)
     countdown = None

@@ -42,40 +42,73 @@ def _source_text(qualification):
     return f"{qualification.code} {source}"
 
 
-class SGStudyLogModal(
-    discord.ui.Modal,
-    title="SG過去問道場ログ"
-):
-    questions_input = discord.ui.TextInput(
-        label="解いた問題数",
-        placeholder="例：25",
-        required=True,
-        min_length=1,
-        max_length=4
-    )
-    score_input = discord.ui.TextInput(
-        label="正答率（%）",
-        placeholder="例：40 または 40.25",
-        required=True,
-        min_length=1,
-        max_length=7
-    )
-    notes_input = discord.ui.TextInput(
-        label="メモ（任意）",
-        placeholder="気になった用語や次回見直す内容",
-        style=discord.TextStyle.paragraph,
-        required=False,
-        max_length=300
-    )
+def category_options(qualification, default=None):
+    """分野の選択肢。説明には進捗表示の見出し（例：テクノロジ系）を付ける。"""
+    group_of = {
+        category: group
+        for group, categories in qualification.progress_groups
+        for category in categories
+    }
+    return [
+        discord.SelectOption(
+            label=category,
+            value=category,
+            description=group_of.get(category),
+            default=category == default,
+        )
+        for category in qualification.category_names
+    ]
 
-    def __init__(self, category, target_channel, qualification=SG):
-        super().__init__(title=f"{_source_text(qualification)}ログ"[:45])
+
+class SGStudyLogModal(discord.ui.Modal):
+    """過去問の記録フォーム。
+
+    category を渡さなければ、フォームの一番上で分野を選ぶ（1画面で入力できる）。
+    default_category を渡すと、その分野を最初から選んだ状態にする。
+    """
+
+    def __init__(self, category, target_channel, qualification=SG,
+                 default_category=None):
+        super().__init__(title=f"{_source_text(qualification)}を記録"[:45])
         self.category = category
         self.target_channel = target_channel
         self.qualification = qualification
 
+        self.category_select = None
+        if category is None:
+            self.category_select = discord.ui.Select(
+                placeholder="学習した分野を1つ選択",
+                options=category_options(qualification, default_category),
+            )
+            self.add_item(discord.ui.Label(
+                text="分野", component=self.category_select
+            ))
+        self.questions_input = discord.ui.TextInput(
+            placeholder="例：25", min_length=1, max_length=4,
+        )
+        self.score_input = discord.ui.TextInput(
+            placeholder="例：40 または 40.25", min_length=1, max_length=7,
+        )
+        self.notes_input = discord.ui.TextInput(
+            placeholder="気になった用語や次回見直す内容",
+            style=discord.TextStyle.paragraph,
+            required=False,
+            max_length=300,
+        )
+        self.add_item(discord.ui.Label(
+            text="解いた問題数", component=self.questions_input
+        ))
+        self.add_item(discord.ui.Label(
+            text="正答率（%）", component=self.score_input
+        ))
+        self.add_item(discord.ui.Label(
+            text="メモ（任意）", component=self.notes_input
+        ))
+
     async def on_submit(self, interaction):
         qualification = self.qualification
+        if self.category_select is not None:
+            self.category = self.category_select.values[0]
         try:
             questions = parse_question_count_input(
                 self.questions_input.value
@@ -178,19 +211,7 @@ class SGStudyLogModal(
 class SGCategorySelect(discord.ui.Select):
     def __init__(self, action_label="問題数と正答率を入力", qualification=SG):
         self.action_label = action_label
-        group_of = {
-            category: group
-            for group, categories in qualification.progress_groups
-            for category in categories
-        }
-        options = [
-            discord.SelectOption(
-                label=category,
-                value=category,
-                description=group_of.get(category),
-            )
-            for category in qualification.category_names
-        ]
+        options = category_options(qualification)
 
         super().__init__(
             placeholder="学習した分野を1つ選択",
@@ -526,6 +547,30 @@ def build_sglog_prompt(guild, user_id, qualification=SG):
         f"【{qualification.display_name}】\n" + SGLOG_PROMPT_TEXT,
         SGStudyLogView(user_id, target_channel, qualification),
     )
+
+
+def build_quick_log_modal(guild, qualification=SG, default_category=None):
+    """(フォーム, 案内文)。フォームを開けないときはフォームが None。"""
+    if guild is None:
+        return None, "記録はサーバー内で入力してください。"
+    target_channel = find_channel(guild, "study_log")
+    if target_channel is None:
+        return None, LOG_CHANNEL_MISSING_TEXT
+    modal = SGStudyLogModal(
+        None, target_channel, qualification, default_category
+    )
+    return modal, None
+
+
+async def open_quick_log(interaction, qualification=SG, default_category=None):
+    """ボタンやスラッシュコマンドから、分野つきの記録フォームを開く。"""
+    modal, message = build_quick_log_modal(
+        interaction.guild, qualification, default_category
+    )
+    if modal is None:
+        await interaction.response.send_message(message, ephemeral=True)
+    else:
+        await interaction.response.send_modal(modal)
 
 
 def build_sgb_prompt(guild, user_id, qualification=SG):

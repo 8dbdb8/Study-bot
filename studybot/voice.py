@@ -19,7 +19,7 @@ from studybot.formatting import format_duration
 from studybot.forms import (
     build_mistake_prompt,
     build_sgb_prompt,
-    build_sglog_prompt,
+    open_quick_log,
 )
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
@@ -174,11 +174,9 @@ class VCActionView(discord.ui.View):
         custom_id="studybot:vc:sglog",
     )
     async def sglog_button(self, interaction, button):
-        message, view = build_sglog_prompt(
-            interaction.guild, interaction.user.id,
-            current_qualification(config.DB_PATH),
+        await open_quick_log(
+            interaction, current_qualification(config.DB_PATH)
         )
-        await respond_private(interaction, message, view)
 
     @discord.ui.button(
         label="科目Bを記録",

@@ -152,13 +152,17 @@ def _progress_line(item, threshold):
 
 
 def build_progress_embed(items, unclassified, b_summary, threshold=60.0,
-                         qualification=None):
+                         qualification=None, overall_score=None):
     """分野ごとの進捗。見出しのまとめ方は資格の progress_groups に従う。"""
     qualification = qualification or SG
     total = sum(item["questions"] for item in items) + unclassified
+    score_text = (
+        f" ・ 正答率 **{overall_score:.1f}%**"
+        if overall_score is not None else ""
+    )
     embed = discord.Embed(
         title=qualification.section_a_title,
-        description=f"累計 **{total}問**（バーは直近の正答率）",
+        description=f"累計 **{total}問**{score_text}（バーは直近の正答率）",
         color=COLOR_DEFAULT,
     )
     by_category = {item["category"]: item for item in items}

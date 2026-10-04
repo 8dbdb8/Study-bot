@@ -2,7 +2,7 @@
 
 import sqlite3
 from contextlib import closing
-from datetime import datetime, time
+from datetime import date, datetime, time, timedelta
 
 import jpholiday
 
@@ -47,6 +47,41 @@ def init_daily_digest_tables(cursor):
             PRIMARY KEY (user_id, sent_on)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS study_rest_days (
+            user_id INTEGER NOT NULL,
+            rest_on TEXT NOT NULL,
+            PRIMARY KEY (user_id, rest_on)
+        )
+    """)
+
+
+# 「今日は休む」は1週間（7日）に1回まで
+REST_DAY_INTERVAL_DAYS = 7
+
+
+def take_rest_day(db_path, user_id, today):
+    """今日を休みにする。(結果, 日付) を返す。
+
+    結果は "ok"（休みにした）、"already"（今日はもう休み）、
+    "too_soon"（前回の休みから7日たっていない。日付は前回の休み）。
+    """
+    since = today - timedelta(days=REST_DAY_INTERVAL_DAYS - 1)
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            last = conn.execute("""
+                SELECT MAX(rest_on) FROM study_rest_days
+                WHERE user_id = ? AND rest_on BETWEEN ? AND ?
+            """, (user_id, since.isoformat(), today.isoformat())).fetchone()[0]
+            if last == today.isoformat():
+                return "already", today
+            if last is not None:
+                return "too_soon", date.fromisoformat(last)
+            conn.execute(
+                "INSERT INTO study_rest_days (user_id, rest_on) VALUES (?, ?)",
+                (user_id, today.isoformat()),
+            )
+    return "ok", today
 
 
 def set_digest_enabled(db_path, user_id, enabled):

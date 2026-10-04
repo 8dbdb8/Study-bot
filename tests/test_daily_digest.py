@@ -213,9 +213,13 @@ class _Response:
     def __init__(self):
         self.sent = []
         self.edits = []
+        self.modals = []
 
     async def send_message(self, content=None, **kwargs):
         self.sent.append(dict(kwargs, content=content))
+
+    async def send_modal(self, modal):
+        self.modals.append(modal)
 
     async def edit_message(self, **kwargs):
         self.edits.append(kwargs)
@@ -284,8 +288,14 @@ class ButtonTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(item.custom_id.startswith("studybot:vc:")
                             for item in view.children))
 
+        # 過去問の記録は、分野も選べる1画面のフォームを直接開く
+        interaction = _interaction(7, guild)
+        await view.sglog_button.callback(interaction)
+        modal = interaction.response.modals[0]
+        self.assertIsInstance(modal, forms.SGStudyLogModal)
+        self.assertIsNotNone(modal.category_select)
+
         for button, expected in (
-            (view.sglog_button, forms.SGStudyLogView),
             (view.sgb_button, forms.SGBPracticeView),
             (view.mistake_button, forms.SGMistakeView),
         ):

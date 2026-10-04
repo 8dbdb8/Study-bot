@@ -23,6 +23,11 @@ def init_exam_result_tables(cursor):
             PRIMARY KEY (user_id, qualification, exam_on)
         )
     """)
+    columns = {
+        row[1] for row in cursor.execute("PRAGMA table_info(exam_results)")
+    }
+    if "score" not in columns:
+        cursor.execute("ALTER TABLE exam_results ADD COLUMN score INTEGER")
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS exam_result_prompts (
             user_id INTEGER NOT NULL,
@@ -89,20 +94,37 @@ def mark_result_prompted(db_path, user_id, qualification, exam_on, today):
             """, (user_id, qualification, exam_on, today.isoformat()))
 
 
+# 試験の得点は1000点満点（SG・FE）
+MAX_EXAM_SCORE = 1000
+
+
+def parse_exam_score(value):
+    """入力された得点。空欄なら None。"""
+    text = str(value or "").strip().translate(
+        str.maketrans("０１２３４５６７８９", "0123456789")
+    )
+    if not text:
+        return None
+    if not text.isdecimal() or not 0 <= int(text) <= MAX_EXAM_SCORE:
+        raise ValueError(f"得点は0〜{MAX_EXAM_SCORE}の整数で入力してください。")
+    return int(text)
+
+
 def record_exam_result(db_path, user_id, qualification, exam_on, result,
-                       recorded_at):
+                       recorded_at, score=None):
     if result not in ("pass", "fail"):
         raise ValueError("結果は pass か fail で指定してください。")
     with closing(sqlite3.connect(db_path)) as conn:
         with conn:
             conn.execute("""
                 INSERT INTO exam_results (
-                    user_id, qualification, exam_on, result, recorded_at
-                ) VALUES (?, ?, ?, ?, ?)
+                    user_id, qualification, exam_on, result, recorded_at, score
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id, qualification, exam_on) DO UPDATE SET
                     result = excluded.result,
-                    recorded_at = excluded.recorded_at
-            """, (user_id, qualification, exam_on, result, recorded_at))
+                    recorded_at = excluded.recorded_at,
+                    score = excluded.score
+            """, (user_id, qualification, exam_on, result, recorded_at, score))
 
 
 def advance_roadmap(db_path, qualification):

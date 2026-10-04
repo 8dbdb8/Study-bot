@@ -425,3 +425,21 @@ def get_sg_plan_status(db_path, user_id, today=None, qualification="SG"):
         "completed": current_index >= weeks,
         "qualification": qualification,
     }
+
+
+def get_weak_categories(db_path, user_id, qualification="SG", threshold=60.0,
+                        min_questions=10):
+    """直近の正答率が低い分野を、弱い順に [(分野, 正答率), ...] で返す。
+
+    min_questions 問以上解いた分野だけを見る。threshold が None なら
+    正答率に関係なくすべて（一番弱い分野を探すとき用）。
+    """
+    items, _ = get_sg_category_progress(db_path, user_id, qualification)
+    weak = [
+        (item["category"], item["latest_score"])
+        for item in items
+        if item["questions"] >= min_questions
+        and item["latest_score"] is not None
+        and (threshold is None or item["latest_score"] < threshold)
+    ]
+    return sorted(weak, key=lambda pair: pair[1])

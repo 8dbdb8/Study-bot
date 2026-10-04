@@ -102,10 +102,16 @@ class ReviewSessionView(discord.ui.View):
         await self._advance(interaction, None)
 
 
-def build_review_session(user_id, today=None):
-    """(Embed, View) か、復習がなければ (案内文, None)。"""
+def build_review_session(user_id, today=None, items=None):
+    """(Embed, View) か、復習がなければ (案内文, None)。
+
+    items を渡すとその誤答を、省略すると今日が復習日の誤答を解き直す。
+    """
     today = today or datetime.now(JST).date()
-    items = get_sg_mistakes(config.DB_PATH, user_id, today=today, due_only=True)
+    if items is None:
+        items = get_sg_mistakes(
+            config.DB_PATH, user_id, today=today, due_only=True
+        )
     if not items:
         return "今日までに復習する問題はありません。", None
     view = ReviewSessionView(

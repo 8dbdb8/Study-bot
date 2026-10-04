@@ -301,7 +301,8 @@ class ExamResultPromptTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(view.timeout)
         self.assertEqual(
             sorted(item.custom_id for item in view.children),
-            ["studybot:exam:fail", "studybot:exam:later", "studybot:exam:pass"],
+            ["studybot:exam:fail", "studybot:exam:later", "studybot:exam:pass",
+             "studybot:exam:score"],
         )
 
 

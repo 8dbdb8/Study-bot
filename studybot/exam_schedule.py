@@ -150,30 +150,46 @@ def strip_week_heading_dates(text):
     return _WEEK_HEADING_DATES.sub(r"\1", text)
 
 
+def _dates(rows):
+    days = set()
+    for (value,) in rows:
+        try:
+            days.add(date.fromisoformat(value))
+        except (TypeError, ValueError):
+            continue
+    return days
+
+
 def get_study_streak(db_path, user_id, today):
     """VC学習か勉強ログがある日の連続日数。
 
     今日まだ記録がなくても、昨日まで続いていれば途切れていない扱いにする。
+    「今日は休む」で休みにした日は、数えないが途切れもしない。
     """
     with closing(sqlite3.connect(db_path)) as conn:
-        rows = conn.execute("""
+        study_days = _dates(conn.execute("""
             SELECT study_date FROM study_sessions
             WHERE user_id = ? AND duration_seconds > 0
             UNION
             SELECT study_date FROM study_logs
             WHERE user_id = ?
-        """, (user_id, user_id)).fetchall()
-
-    study_days = set()
-    for (value,) in rows:
+        """, (user_id, user_id)).fetchall())
         try:
-            study_days.add(date.fromisoformat(value))
-        except (TypeError, ValueError):
-            continue
+            rest_days = _dates(conn.execute(
+                "SELECT rest_on FROM study_rest_days WHERE user_id = ?",
+                (user_id,),
+            ).fetchall())
+        except sqlite3.OperationalError:
+            rest_days = set()
+    rest_days -= study_days
 
-    cursor_day = today if today in study_days else today - timedelta(days=1)
+    def counted(day):
+        return day in study_days or day in rest_days
+
+    cursor_day = today if counted(today) else today - timedelta(days=1)
     streak = 0
-    while cursor_day in study_days:
-        streak += 1
+    while counted(cursor_day):
+        if cursor_day in study_days:
+            streak += 1
         cursor_day -= timedelta(days=1)
     return streak
