@@ -1,7 +1,7 @@
 """Botが使うチャンネルの設定と検索。
 
 /setup で選んだチャンネルをサーバーごとにIDで覚える。
-未設定のときは config の名前（勉強部屋・勉強ログ・SG用語集）で探す。
+未設定のときは config の名前（勉強部屋・勉強ログ・SG用語集など）で探す。
 """
 
 import sqlite3
@@ -32,6 +32,11 @@ CHANNEL_KINDS = {
     "ai_report": (
         "週間レポートとNotionの通知のテキストチャンネル",
         config.AI_REPORT_CHANNEL_NAME,
+        "text",
+    ),
+    "focus": (
+        "集中タイマーのお知らせのテキストチャンネル",
+        config.FOCUS_CHANNEL_NAME,
         "text",
     ),
 }

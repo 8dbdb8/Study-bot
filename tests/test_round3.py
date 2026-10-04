@@ -129,6 +129,7 @@ class _Context:
         self.author = SimpleNamespace(id=user_id)
         self.interaction = _interaction(user_id) if interaction else None
         self.channel = _Channel()
+        self.guild = None
         self.messages = []
 
     async def send(self, content=None, **kwargs):
@@ -147,7 +148,9 @@ class _Typing:
 
 
 class _Channel:
-    def __init__(self):
+    def __init__(self, channel_id=1):
+        self.id = channel_id
+        self.mention = f"<#{channel_id}>"
         self.sent = []
 
     async def send(self, content=None, **kwargs):
@@ -514,6 +517,19 @@ class FocusTimerTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         today = datetime.now(config.JST).date()
         self.assertEqual(get_focus_sets(self.db_path, 7, today), (2, 50))
         self.assertNotIn(7, focus_feature.FOCUS_TIMERS)
+
+    async def test_uses_focus_channel(self):
+        focus_channel = _Channel(55)
+        ctx = _Context()
+        ctx.guild = SimpleNamespace(id=1)
+        with patch.object(
+            focus_feature, "find_channel", lambda guild, kind: focus_channel
+        ):
+            await focus_feature.focus.callback(ctx, sets=1)
+        self.assertIn("お知らせは <#55> に届きます", ctx.messages[0]["content"])
+        await focus_feature.FOCUS_TIMERS[7]["task"]
+        self.assertIn("1セット完了", focus_channel.sent[0]["content"])
+        self.assertEqual(ctx.channel.sent, [])
 
     async def test_stop_and_validation(self):
         gate = asyncio.Event()

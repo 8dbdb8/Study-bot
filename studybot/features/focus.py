@@ -1,7 +1,8 @@
 """/time focus：集中タイマー（ポモドーロ）。
 
 決めた分数だけ集中し、短い休憩をはさんで何セットか繰り返す。
-区切りごとにコマンドを使ったチャンネルで知らせ、終えたセット数を記録する。
+区切りごとに #集中タイマー（なければコマンドを使ったチャンネル）で知らせ、
+終えたセット数を記録する。
 タイマーはBotのメモリ上で動くので、Botを再起動すると止まる。
 """
 
@@ -12,6 +13,7 @@ import discord
 from discord import app_commands
 
 from studybot import config
+from studybot.channels import find_channel
 from studybot.config import JST
 from studybot.groups import time_group
 from studybot.habits import add_focus_set, get_focus_sets
@@ -103,13 +105,17 @@ async def focus(ctx, minutes: int = 25, break_minutes: int = 5, sets: int = 4,
         )
         return
 
+    channel = find_channel(ctx.guild, "focus") or ctx.channel
     FOCUS_TIMERS[user_id] = {"done": 0, "sets": sets}
     FOCUS_TIMERS[user_id]["task"] = asyncio.create_task(
-        run_focus(ctx.channel, user_id, minutes, break_minutes, sets)
+        run_focus(channel, user_id, minutes, break_minutes, sets)
     )
     total = minutes * sets + break_minutes * (sets - 1)
+    where = ""
+    if channel.id != ctx.channel.id:
+        where = f"お知らせは {channel.mention} に届きます。"
     await ctx.send(
         f"⏱ 集中タイマー開始：{minutes}分 × {sets}セット"
-        f"（休憩{break_minutes}分・全部で約{total}分）。"
+        f"（休憩{break_minutes}分・全部で約{total}分）。{where}"
         "止めるときは `/time focus stop:True`"
     )

@@ -105,7 +105,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
             field.name: field.value
             for field in setup_feature.build_setup_embed(self.guild).fields
         }
-        self.assertEqual(len(fields), 4)
+        self.assertEqual(len(fields), 5)
         values = list(fields.values())
         self.assertIn("<#10>（名前「勉強部屋」で自動検出）", values)
         self.assertIn("<#21>（設定済み）", values)
@@ -113,19 +113,28 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
 
     async def test_select_and_reset(self):
         view = setup_feature.SetupView(owner_id=5)
-        selects = [
-            item for item in view.children
-            if isinstance(item, setup_feature.ChannelKindSelect)
-        ]
         self.assertEqual(
-            [select.kind for select in selects],
-            ["study_voice", "study_log", "glossary", "ai_report"],
+            [option.value for option in view.picker.options],
+            ["study_voice", "study_log", "glossary", "ai_report", "focus"],
         )
+        self.assertEqual(view.channel_select.kind, "study_voice")
+        self.assertEqual(len(view.to_components()), 3)
         interaction = SimpleNamespace(
             guild=self.guild, user=SimpleNamespace(id=5), response=_Response()
         )
 
-        log_select = selects[1]
+        with patch.object(
+            type(view.picker), "values", new=["study_log"],
+        ):
+            await view.picker.callback(interaction)
+        log_select = view.channel_select
+        self.assertEqual(log_select.kind, "study_log")
+        self.assertEqual(
+            [option.default for option in view.picker.options],
+            [False, True, False, False, False],
+        )
+        self.assertEqual(len(view.children), 3)
+
         with patch.object(
             type(log_select), "values",
             new=[SimpleNamespace(id=21)],

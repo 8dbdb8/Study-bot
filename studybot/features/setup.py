@@ -1,4 +1,4 @@
-"""/setup：Botが使うチャンネル（勉強部屋・勉強ログ・SG用語集・ai-report）を選ぶ。"""
+"""/setup：Botが使うチャンネル（勉強部屋・勉強ログ・SG用語集・ai-report・集中タイマー）を選ぶ。"""
 
 import discord
 from discord import app_commands
@@ -38,16 +38,41 @@ def build_setup_embed(guild):
     return embed
 
 
+class KindPicker(discord.ui.Select):
+    """どのチャンネルを設定するかを選ぶ。"""
+
+    def __init__(self, selected):
+        super().__init__(
+            placeholder="設定するチャンネルを選ぶ",
+            options=[
+                discord.SelectOption(
+                    label=default_name,
+                    value=kind,
+                    description=label,
+                    default=kind == selected,
+                )
+                for kind, (label, default_name, _) in CHANNEL_KINDS.items()
+            ],
+            row=0,
+        )
+
+    async def callback(self, interaction):
+        self.view.show(self.values[0])
+        await interaction.response.edit_message(
+            embed=build_setup_embed(interaction.guild), view=self.view
+        )
+
+
 class ChannelKindSelect(discord.ui.ChannelSelect):
-    def __init__(self, kind, row):
-        label, _, channel_type = CHANNEL_KINDS[kind]
+    def __init__(self, kind, row=1):
+        label, default_name, channel_type = CHANNEL_KINDS[kind]
         channel_types = (
             [discord.ChannelType.voice, discord.ChannelType.stage_voice]
             if channel_type == "voice"
             else [discord.ChannelType.text]
         )
         super().__init__(
-            placeholder=label,
+            placeholder=f"「{default_name}」に使うチャンネルを選ぶ",
             channel_types=channel_types,
             min_values=1,
             max_values=1,
@@ -69,8 +94,19 @@ class SetupView(discord.ui.View):
     def __init__(self, owner_id):
         super().__init__(timeout=600)
         self.owner_id = owner_id
-        for row, kind in enumerate(CHANNEL_KINDS):
-            self.add_item(ChannelKindSelect(kind, row))
+        self.picker = None
+        self.channel_select = None
+        self.show(next(iter(CHANNEL_KINDS)))
+
+    def show(self, kind):
+        """kind のチャンネルを選ぶメニューに切り替える。"""
+        for item in (self.picker, self.channel_select):
+            if item is not None:
+                self.remove_item(item)
+        self.picker = KindPicker(kind)
+        self.channel_select = ChannelKindSelect(kind)
+        self.add_item(self.picker)
+        self.add_item(self.channel_select)
 
     async def interaction_check(self, interaction):
         if interaction.user.id == self.owner_id:
@@ -83,7 +119,7 @@ class SetupView(discord.ui.View):
     @discord.ui.button(
         label="名前で探す設定に戻す",
         style=discord.ButtonStyle.secondary,
-        row=4,
+        row=2,
     )
     async def reset_button(self, interaction, button):
         for kind in CHANNEL_KINDS:
@@ -97,7 +133,7 @@ class SetupView(discord.ui.View):
 
 @app_commands.command(
     name="setup",
-    description="StudyBotが使うチャンネル（勉強部屋・勉強ログ・用語集・ai-report）を選ぶ",
+    description="StudyBotが使うチャンネル（勉強部屋・勉強ログ・用語集・ai-report・集中タイマー）を選ぶ",
 )
 @app_commands.guild_only()
 @app_commands.default_permissions(manage_guild=True)
