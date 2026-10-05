@@ -83,7 +83,7 @@ def _make_qualification_group(qualification):
         await send_group_help(ctx)
 
     description = f"{qualification.display_name}の記録・進捗"
-    if qualification.code == "SG":
+    if qualification.code in ("SG", "FE"):
         description += "・用語集"
     return commands.hybrid_group(
         name=qualification.command,

@@ -5,7 +5,7 @@
 
 import sqlite3
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 
 # 予想に使う期間と、予想を出すのに必要な科目Aの問題数
@@ -26,6 +26,16 @@ def init_scoring_tables(cursor):
             parts TEXT NOT NULL,
             minutes INTEGER,
             score INTEGER NOT NULL
+        )
+    """)
+    # 動いている模試タイマー（Botを再起動しても続きから動かすため）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS mock_timers (
+            user_id INTEGER PRIMARY KEY,
+            qualification TEXT NOT NULL,
+            channel_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL,
+            minutes INTEGER NOT NULL
         )
     """)
 
@@ -225,3 +235,44 @@ def has_recent_mock(db_path, user_id, qualification_code, today, days=7):
             LIMIT 1
         """, (user_id, qualification_code, since)).fetchone()
     return row is not None
+
+
+# ------------------------------------------------------------
+# 模試タイマー
+# ------------------------------------------------------------
+
+def save_mock_timer(db_path, user_id, qualification, channel_id, started_at, minutes):
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            conn.execute("""
+                INSERT OR REPLACE INTO mock_timers (
+                    user_id, qualification, channel_id, started_at, minutes
+                ) VALUES (?, ?, ?, ?, ?)
+            """, (user_id, qualification, channel_id, started_at.isoformat(), minutes))
+
+
+def get_mock_timer(db_path, user_id):
+    """{"qualification", "channel_id", "started_at", "minutes"}。なければ None。"""
+    with closing(sqlite3.connect(db_path)) as conn:
+        row = conn.execute("""
+            SELECT qualification, channel_id, started_at, minutes
+            FROM mock_timers WHERE user_id = ?
+        """, (user_id,)).fetchone()
+    if row is None:
+        return None
+    return {
+        "user_id": user_id, "qualification": row[0], "channel_id": row[1],
+        "started_at": datetime.fromisoformat(row[2]), "minutes": row[3],
+    }
+
+
+def list_mock_timers(db_path):
+    with closing(sqlite3.connect(db_path)) as conn:
+        user_ids = [row[0] for row in conn.execute("SELECT user_id FROM mock_timers")]
+    return [get_mock_timer(db_path, user_id) for user_id in user_ids]
+
+
+def delete_mock_timer(db_path, user_id):
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            conn.execute("DELETE FROM mock_timers WHERE user_id = ?", (user_id,))

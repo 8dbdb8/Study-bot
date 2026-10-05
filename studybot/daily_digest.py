@@ -31,6 +31,13 @@ def digest_datetime(day, weekday_time, holiday_time, tzinfo):
 
 
 def init_daily_digest_tables(cursor):
+    # 表示の設定（スマホ向けのコンパクト表示にするか）
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS display_settings (
+            user_id INTEGER PRIMARY KEY,
+            compact INTEGER NOT NULL DEFAULT 0
+        )
+    """)
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS daily_digest_settings (
             user_id INTEGER PRIMARY KEY,
@@ -92,6 +99,28 @@ def set_digest_enabled(db_path, user_id, enabled):
                 VALUES (?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET enabled = excluded.enabled
             """, (user_id, 1 if enabled else 0))
+
+
+def set_compact_display(db_path, user_id, compact):
+    with closing(sqlite3.connect(db_path)) as conn:
+        with conn:
+            conn.execute("""
+                INSERT INTO display_settings (user_id, compact) VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET compact = excluded.compact
+            """, (user_id, 1 if compact else 0))
+
+
+def is_compact_display(db_path, user_id):
+    """学習メニューと退出通知をコンパクト表示にしているか。"""
+    try:
+        with closing(sqlite3.connect(db_path)) as conn:
+            row = conn.execute(
+                "SELECT compact FROM display_settings WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+    except sqlite3.Error:
+        return False
+    return bool(row and row[0])
 
 
 def is_digest_enabled(db_path, user_id):

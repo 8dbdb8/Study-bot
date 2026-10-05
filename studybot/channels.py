@@ -39,6 +39,11 @@ CHANNEL_KINDS = {
         config.FOCUS_CHANNEL_NAME,
         "text",
     ),
+    "fe_glossary": (
+        "FEの「今日の1語」を投稿するテキストチャンネル",
+        config.FE_GLOSSARY_CHANNEL_NAME,
+        "text",
+    ),
 }
 
 

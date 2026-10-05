@@ -1,4 +1,4 @@
-"""/sg glossary：SG用語集の一覧と単語帳。"""
+"""/sg glossary・/fe glossary：用語集の一覧と単語帳。"""
 
 import random
 import sqlite3
@@ -12,7 +12,8 @@ from discord import app_commands
 from studybot import config
 from studybot.channels import channel_label, is_channel
 from studybot.config import JST, SG_GLOSSARY_CATEGORIES
-from studybot.groups import sg_group
+from studybot.groups import QUALIFICATION_GROUPS, sg_group
+from studybot.qualifications import FE
 from studybot.sg_glossary import (
     get_sg_glossary_ratings,
     glossary_entry_key,
@@ -23,6 +24,8 @@ from studybot.sg_glossary import (
     search_glossary,
     SG_GLOSSARY_RATINGS,
     SOURCE_GLOSSARY_URL,
+    FE_GLOSSARY_PATH,
+    FE_SOURCE_URL,
     split_text,
 )
 from studybot.sg_glossary_history import (
@@ -77,19 +80,19 @@ def _sg_glossary_list_pages(entries):
     return pages
 
 
-def _sg_glossary_source_url(entry):
-    url = entry.source_url or SOURCE_GLOSSARY_URL
+def _sg_glossary_source_url(entry, fallback=SOURCE_GLOSSARY_URL):
+    url = entry.source_url or fallback
     try:
         parsed = urlsplit(url)
     except ValueError:
-        return SOURCE_GLOSSARY_URL
+        return fallback
     if (
         parsed.scheme not in ("http", "https")
         or not parsed.netloc
         or len(url) > 350
         or any(character.isspace() or character in "<>" for character in url)
     ):
-        return SOURCE_GLOSSARY_URL
+        return fallback
     return url
 
 
@@ -118,9 +121,12 @@ class SGGlossaryView(discord.ui.View):
     def __init__(
         self, owner_id, entries, mode="list", category="all", query=None,
         ratings=None, record_channel=None, guild_id=None,
-        history_db_path=GLOSSARY_HISTORY_PATH,
+        history_db_path=GLOSSARY_HISTORY_PATH, label="SG",
+        source_fallback=SOURCE_GLOSSARY_URL,
     ):
         super().__init__(timeout=300)
+        self.label = label
+        self.source_fallback = source_fallback
         self.owner_id = owner_id
         self.all_entries = tuple(entries)
         self.entries = self.all_entries
@@ -226,7 +232,10 @@ class SGGlossaryView(discord.ui.View):
         )
         if self.mode == "list":
             body, _ = self.list_pages[self.page_index]
-            sources = {_sg_glossary_source_url(entry) for entry in self.entries}
+            sources = {
+                _sg_glossary_source_url(entry, self.source_fallback)
+                for entry in self.entries
+            }
             source_label = (
                 "用語出典" if all(entry.source_url for entry in self.entries)
                 else "参考サイト"
@@ -236,7 +245,7 @@ class SGGlossaryView(discord.ui.View):
                 if len(sources) == 1 else "\n\n用語出典は各カードに表示"
             )
             return (
-                f"**SG用語集・一覧**（分野: {category_name}{query_note}"
+                f"**{self.label}用語集・一覧**（分野: {category_name}{query_note}"
                 f"{filter_note} / {count}件） "
                 f"{self.page_index + 1}/{len(self.list_pages)}ページ\n\n"
                 f"{body}{source_note}"
@@ -249,7 +258,7 @@ class SGGlossaryView(discord.ui.View):
             f"> {line}" for line in category_label.splitlines()
         )
         heading = (
-            f"**SG単語帳**（対象: {category_name}{query_note}{filter_note} / "
+            f"**{self.label}単語帳**（対象: {category_name}{query_note}{filter_note} / "
             f"{self.card_index + 1}/{count}件）\n\n"
             f"**{_safe_glossary_text(entry.term)}**\n"
             f"{category_quote}"
@@ -266,7 +275,7 @@ class SGGlossaryView(discord.ui.View):
             f"（意味 {self.meaning_page + 1}/{len(parts)}）\n"
             if len(parts) > 1 else ""
         )
-        source = _sg_glossary_source_url(entry)
+        source = _sg_glossary_source_url(entry, self.source_fallback)
         source_label = "用語出典" if entry.source_url else "参考サイト"
         current_rating = self.ratings.get(glossary_entry_key(entry))
         rating_note = (
@@ -526,6 +535,57 @@ async def sgglossary(
     ctx, mode: str = "list", category: str = "all", query: str | None = None,
 ):
     is_interaction = getattr(ctx, "interaction", None) is not None
+    if (
+        ctx.guild is None
+        or not is_channel(ctx.channel, "glossary", ctx.guild)
+    ):
+        message = f"このコマンドは {channel_label(ctx.guild, 'glossary')} で使ってください。"
+        if is_interaction:
+            await ctx.send(message, ephemeral=True)
+        else:
+            await ctx.send(message)
+        return
+    await open_glossary(
+        ctx, mode, category, query,
+        label="SG", path=GLOSSARY_PATH, categories=SG_GLOSSARY_CATEGORIES,
+        source_fallback=SOURCE_GLOSSARY_URL, record_channel=ctx.channel,
+    )
+
+
+@QUALIFICATION_GROUPS["FE"].command(
+    name="glossary",
+    description="FE用語集を一覧または単語帳で見る（本人にだけ表示）"
+)
+@app_commands.describe(
+    mode="表示方法",
+    category="表示する分野",
+    query="用語・意味・分野を検索",
+)
+@app_commands.choices(
+    mode=[
+        app_commands.Choice(name="一覧", value="list"),
+        app_commands.Choice(name="単語帳", value="cards"),
+    ],
+    category=[
+        app_commands.Choice(name="全分野", value="all"),
+        *(app_commands.Choice(name=name, value=name) for name in FE.category_names),
+    ],
+)
+async def feglossary(
+    ctx, mode: str = "list", category: str = "all", query: str | None = None,
+):
+    # FE用語集はどのチャンネルでも使える（学習記録の投稿はしない）
+    await open_glossary(
+        ctx, mode, category, query,
+        label="FE", path=FE_GLOSSARY_PATH, categories=FE.category_names,
+        source_fallback=FE_SOURCE_URL, record_channel=None,
+    )
+
+
+async def open_glossary(ctx, mode, category, query, label, path, categories,
+                        source_fallback, record_channel):
+    is_interaction = getattr(ctx, "interaction", None) is not None
+    data_file = f"data/{path.name}" if hasattr(path, "name") else str(path)
 
     async def reply(message, view=None):
         kwargs = {"view": view} if view is not None else {}
@@ -533,20 +593,11 @@ async def sgglossary(
             kwargs["ephemeral"] = True
         await ctx.send(message, **kwargs)
 
-    if (
-        ctx.guild is None
-        or not is_channel(ctx.channel, "glossary", ctx.guild)
-    ):
-        await reply(
-            f"このコマンドは {channel_label(ctx.guild, 'glossary')} で使ってください。"
-        )
-        return
-
     normalized_mode = {"一覧": "list", "単語帳": "cards"}.get(mode, mode)
     if normalized_mode not in ("list", "cards"):
         await reply("表示方法は「一覧」または「単語帳」を選んでください。")
         return
-    if category != "all" and category not in SG_GLOSSARY_CATEGORIES:
+    if category != "all" and category not in categories:
         await reply("分野は候補から選んでください。")
         return
     if query and len(query) > 100:
@@ -554,19 +605,19 @@ async def sgglossary(
         return
 
     try:
-        all_entries = load_glossary(GLOSSARY_PATH)
+        all_entries = load_glossary(path)
     except FileNotFoundError:
         await reply(
-            "SG用語データがありません。`data/sg_glossary.json` を配置してください。\n"
-            f"参照先: <{SOURCE_GLOSSARY_URL}>"
+            f"{label}用語データがありません。`{data_file}` を配置してください。\n"
+            f"参照先: <{source_fallback}>"
         )
         return
     except (OSError, GlossaryDataError) as error:
-        await reply(f"SG用語データを読み込めません: {error}")
+        await reply(f"{label}用語データを読み込めません: {error}")
         return
 
     if not all_entries:
-        await reply("SG用語データは空です。`data/sg_glossary.json` に用語を追加してください。")
+        await reply(f"{label}用語データは空です。`{data_file}` に用語を追加してください。")
         return
     entries = (
         all_entries if category == "all"
@@ -588,8 +639,9 @@ async def sgglossary(
         return
     view = SGGlossaryView(
         ctx.author.id, entries, normalized_mode, category, query,
-        ratings=ratings, record_channel=ctx.channel,
-        guild_id=ctx.guild.id,
+        ratings=ratings, record_channel=record_channel,
+        guild_id=ctx.guild.id if ctx.guild else None,
         history_db_path=GLOSSARY_HISTORY_PATH,
+        label=label, source_fallback=source_fallback,
     )
     await reply(view.content(), view=view)

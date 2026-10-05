@@ -20,14 +20,17 @@ from studybot.formatting import format_category_label, get_review_candidates
 from studybot.features.review import build_review_session
 from studybot.activity_forms import build_study_log_prompt
 from studybot.forms import build_sgb_prompt, open_quick_log
+from studybot.features import mock_timer
 from studybot.features.badges import announce_new_badges
+from studybot.features.focus import notice_channel
 from studybot.groups import QUALIFICATION_GROUPS
-from studybot.qualifications import QUALIFICATIONS
+from studybot.qualifications import QUALIFICATIONS, get_qualification
 from studybot.replies import respond_private, send_png, send_private
 from studybot.scoring import (
     DISCLAIMER,
     MIN_PREDICTION_QUESTIONS,
     format_margin,
+    get_mock_timer,
     list_mock_exams,
     predict_score,
     prediction_summary,
@@ -240,7 +243,7 @@ def add_prediction_field(embed, user_id, qualification, today):
 class MockExamModal(discord.ui.Modal):
     """模試の正解数と時間を入れる。問題数が決まっていない区分は問題数も入れる。"""
 
-    def __init__(self, qualification):
+    def __init__(self, qualification, minutes_default=None):
         super().__init__(title=f"{qualification.code} 模試（本番形式）を記録"[:45])
         self.qualification = qualification
         self.part_inputs = []
@@ -262,7 +265,8 @@ class MockExamModal(discord.ui.Modal):
             if qualification.exam_minutes else "空欄でも可"
         )
         self.minutes_input = discord.ui.TextInput(
-            placeholder=placeholder, required=False, max_length=3
+            placeholder=placeholder, required=False, max_length=3,
+            default=str(minutes_default) if minutes_default else None,
         )
         self.add_item(discord.ui.Label(
             text="かかった時間（分）", component=self.minutes_input
@@ -340,13 +344,82 @@ async def build_mock_result(user_id, qualification, parts, minutes, score):
     return embed, png
 
 
-async def record_mock(ctx, qualification):
+class MockFinishView(discord.ui.View):
+    """模試タイマーの「解き終わった」ボタン。再起動後も押せる。"""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="解き終わった・結果を入力",
+        style=discord.ButtonStyle.primary,
+        custom_id="studybot:mock:finish",
+    )
+    async def finish_button(self, interaction, button):
+        timer = get_mock_timer(config.DB_PATH, interaction.user.id)
+        qualification = get_qualification(timer["qualification"]) if timer else None
+        if qualification is None:
+            await respond_private(
+                interaction,
+                "動いている模試タイマーはありません。"
+                "結果は `/sg mock`（FEは `/fe mock`）から入力できます。",
+            )
+            return
+        minutes = mock_timer.elapsed_minutes(timer)
+        mock_timer.stop_mock_timer(interaction.user.id)
+        await interaction.response.send_modal(
+            MockExamModal(qualification, minutes_default=minutes)
+        )
+
+
+def _mock_timer_running(user_id):
+    if user_id in mock_timer.MOCK_TIMERS:
+        return True
+    timer = get_mock_timer(config.DB_PATH, user_id)
+    return timer is not None and mock_timer.elapsed_minutes(timer) < timer["minutes"]
+
+
+async def record_mock(ctx, qualification, timer=None):
+    if timer == "start":
+        await start_mock(ctx, qualification)
+        return
+    if timer == "stop":
+        stopped = mock_timer.stop_mock_timer(ctx.author.id)
+        if stopped is None:
+            await send_private(ctx, "動いている模試タイマーはありません。")
+        else:
+            await send_private(
+                ctx,
+                f"⏹ 模試タイマーを止めました（{mock_timer.elapsed_minutes(stopped)}分経過）。",
+            )
+        return
     if getattr(ctx, "interaction", None) is not None:
         await ctx.interaction.response.send_modal(MockExamModal(qualification))
         return
     await ctx.send(
         f"模試の記録は `/{qualification.command} mock` から入力してください。"
     )
+
+
+async def start_mock(ctx, qualification):
+    if not qualification.exam_minutes:
+        await send_private(
+            ctx, f"{qualification.display_name}は本番の時間が決まっていないため、タイマーを使えません。"
+        )
+        return
+    if _mock_timer_running(ctx.author.id):
+        await send_private(
+            ctx,
+            "模試タイマーはすでに動いています。"
+            f"止めるときは `/{qualification.command} mock timer:止める` を使ってください。",
+        )
+        return
+    channel = notice_channel(ctx.guild, ctx.channel)
+    mock_timer.start_mock_timer(channel, ctx.author.id, qualification, MockFinishView)
+    text = mock_timer.timer_start_text(qualification)
+    if channel.id != ctx.channel.id:
+        text += f"\nお知らせは {channel.mention} に届きます。"
+    await ctx.send(text, view=MockFinishView())
 
 
 async def show_chart(ctx, qualification, category="all"):
@@ -438,8 +511,13 @@ def add_qualification_commands(qualification, group):
         name="mock",
         description=f"{code}の模試（本番形式）の結果を記録して推移を表示",
     )
-    async def mock_command(ctx):
-        await record_mock(ctx, qualification)
+    @app_commands.describe(timer="本番と同じ時間を計るタイマー（省略すると結果の入力）")
+    @app_commands.choices(timer=[
+        app_commands.Choice(name="開始", value="start"),
+        app_commands.Choice(name="止める", value="stop"),
+    ])
+    async def mock_command(ctx, timer: str | None = None):
+        await record_mock(ctx, qualification, timer)
 
     created["mock"] = mock_command
     return created

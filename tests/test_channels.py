@@ -105,7 +105,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
             field.name: field.value
             for field in setup_feature.build_setup_embed(self.guild).fields
         }
-        self.assertEqual(len(fields), 5)
+        self.assertEqual(len(fields), 6)
         values = list(fields.values())
         self.assertIn("<#10>（名前「勉強部屋」で自動検出）", values)
         self.assertIn("<#21>（設定済み）", values)
@@ -115,7 +115,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
         view = setup_feature.SetupView(owner_id=5)
         self.assertEqual(
             [option.value for option in view.picker.options],
-            ["study_voice", "study_log", "glossary", "ai_report", "focus"],
+            ["study_voice", "study_log", "glossary", "ai_report", "focus", "fe_glossary"],
         )
         self.assertEqual(view.channel_select.kind, "study_voice")
         self.assertEqual(len(view.to_components()), 3)
@@ -131,7 +131,7 @@ class SetupViewTests(_ChannelDBCase, unittest.IsolatedAsyncioTestCase):
         self.assertEqual(log_select.kind, "study_log")
         self.assertEqual(
             [option.default for option in view.picker.options],
-            [False, True, False, False, False],
+            [False, True, False, False, False, False],
         )
         self.assertEqual(len(view.children), 4)
 

@@ -13,6 +13,9 @@ from pathlib import Path
 
 GLOSSARY_PATH = Path(__file__).resolve().parents[1] / "data" / "sg_glossary.json"
 SOURCE_GLOSSARY_URL = "https://www.sg-siken.com/keyword/"
+# FE用語集（StudyBotで作成）。参考サイトはIPAのシラバスのページ
+FE_GLOSSARY_PATH = Path(__file__).resolve().parents[1] / "data" / "fe_glossary.json"
+FE_SOURCE_URL = "https://www.ipa.go.jp/shiken/syllabus/gaiyou.html"
 SG_GLOSSARY_RATINGS = (
     "できた",
     "できなかった",

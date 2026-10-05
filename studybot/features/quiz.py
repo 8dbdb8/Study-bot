@@ -1,4 +1,4 @@
-"""/sg quiz：SG用語の4択ミニテスト。
+"""/sg quiz・/fe quiz：用語の4択ミニテスト。
 
 用語集の意味を見せて、正しい用語を4つから選ぶ（5問）。
 間違えた用語は単語帳の自己評価を「要復習」にする。
@@ -14,10 +14,12 @@ from studybot import config
 from studybot.config import JST, SG_GLOSSARY_CATEGORIES
 from studybot.embeds import COLOR_DEFAULT, COLOR_SUCCESS
 from studybot.features.badges import announce_new_badges
-from studybot.groups import sg_group
+from studybot.groups import QUALIFICATION_GROUPS, sg_group
+from studybot.qualifications import FE
 from studybot.quiz import QUIZ_SIZE, build_quiz, save_quiz_result
 from studybot.replies import send_private
 from studybot.sg_glossary import (
+    FE_GLOSSARY_PATH,
     GLOSSARY_PATH,
     GlossaryDataError,
     get_sg_glossary_ratings,
@@ -29,14 +31,19 @@ from studybot.sg_glossary import (
 ALL_CATEGORIES = "all"
 
 
-def load_quiz(user_id, category=ALL_CATEGORIES, rng=None):
+def _glossary_path(label):
+    return FE_GLOSSARY_PATH if label == "FE" else GLOSSARY_PATH
+
+
+def load_quiz(user_id, category=ALL_CATEGORIES, rng=None, label="SG"):
     """(問題のリスト, エラー文)。問題を作れないときはリストが空。"""
+    path = _glossary_path(label)
     try:
-        entries = load_glossary(GLOSSARY_PATH)
+        entries = load_glossary(path)
     except FileNotFoundError:
-        return [], "SG用語データがありません。`data/sg_glossary.json` を配置してください。"
+        return [], f"{label}用語データがありません。`data/{path.name}` を配置してください。"
     except (OSError, GlossaryDataError) as error:
-        return [], f"SG用語データを読み込めません: {error}"
+        return [], f"{label}用語データを読み込めません: {error}"
     if category != ALL_CATEGORIES:
         entries = [entry for entry in entries if entry.category == category]
     try:
@@ -79,18 +86,23 @@ class AgainButton(discord.ui.Button):
         super().__init__(label=f"もう{QUIZ_SIZE}問", style=discord.ButtonStyle.primary)
 
     async def callback(self, interaction):
-        questions, error = load_quiz(self.view.owner_id, self.view.category)
+        questions, error = load_quiz(
+            self.view.owner_id, self.view.category, label=self.view.label
+        )
         if error:
             await interaction.response.send_message(error, ephemeral=True)
             return
-        view = QuizView(self.view.owner_id, questions, self.view.category)
+        view = QuizView(
+            self.view.owner_id, questions, self.view.category, self.view.label
+        )
         await interaction.response.edit_message(embed=view.embed(), view=view)
 
 
 class QuizView(discord.ui.View):
-    def __init__(self, owner_id, questions, category=ALL_CATEGORIES):
+    def __init__(self, owner_id, questions, category=ALL_CATEGORIES, label="SG"):
         super().__init__(timeout=900)
         self.owner_id = owner_id
+        self.label = label
         self.questions = questions
         self.category = category
         self.index = 0
@@ -142,7 +154,7 @@ class QuizView(discord.ui.View):
         question = self.question
         embed = discord.Embed(
             title=(
-                f"用語ミニテスト {self.index + 1}/{len(self.questions)}"
+                f"{self.label}用語ミニテスト {self.index + 1}/{len(self.questions)}"
                 f" ・ {question.entry.category or _category_label(self.category)}"
             ),
             description=f"**この意味の用語は？**\n>>> {question.prompt[:1500]}",
@@ -168,7 +180,10 @@ class QuizView(discord.ui.View):
             lines.append(
                 "間違えた用語：" + "・".join(f"**{term}**" for term in self.missed)
             )
-            lines.append("（単語帳の「要復習」に入れました。`/sg glossary` で見直せます）")
+            lines.append(
+                "（単語帳の「要復習」に入れました。"
+                f"`/{self.label.lower()} glossary` で見直せます）"
+            )
         return discord.Embed(
             title=f"ミニテストおわり ・ {_category_label(self.category)}",
             description="\n".join(lines),
@@ -232,4 +247,25 @@ async def quiz(ctx, category: str = ALL_CATEGORIES):
         await send_private(ctx, error)
         return
     view = QuizView(ctx.author.id, questions, category)
+    await send_private(ctx, embed=view.embed(), view=view)
+
+
+@QUALIFICATION_GROUPS["FE"].command(
+    name="quiz",
+    description=f"FE用語の4択ミニテスト（{QUIZ_SIZE}問）",
+)
+@app_commands.describe(category="出題する分野（省略すると全分野）")
+@app_commands.choices(category=[
+    app_commands.Choice(name="全分野", value=ALL_CATEGORIES),
+    *(app_commands.Choice(name=name, value=name) for name in FE.category_names),
+])
+async def fe_quiz(ctx, category: str = ALL_CATEGORIES):
+    if category != ALL_CATEGORIES and category not in FE.category_names:
+        await send_private(ctx, "分野は候補から選んでください。")
+        return
+    questions, error = load_quiz(ctx.author.id, category, label="FE")
+    if error:
+        await send_private(ctx, error)
+        return
+    view = QuizView(ctx.author.id, questions, category, "FE")
     await send_private(ctx, embed=view.embed(), view=view)

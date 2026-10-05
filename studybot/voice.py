@@ -14,6 +14,7 @@ from studybot.database import (
     save_active_study_session,
     save_completed_study_session,
 )
+from studybot.daily_digest import is_compact_display
 from studybot.embeds import build_vc_summary_embed
 from studybot.formatting import format_duration
 from studybot.forms import (
@@ -399,6 +400,7 @@ def build_study_end_embed(guild, user_id, display_name, session_seconds):
         get_exam_countdown_line(user_id),
         channel_label(guild, "study_log"),
         build_study_end_extras(user_id, today, today_seconds),
+        compact=is_compact_display(config.DB_PATH, user_id),
     )
 
 

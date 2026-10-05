@@ -1,7 +1,9 @@
-"""今日の1語：毎朝7:30に #SG用語集 へ用語を1つ投稿する。
+"""今日の1語：毎朝7:30に用語を1つ投稿する。
 
+SGを学習中なら #SG用語集 にSG用語集から、FEを学習中なら #FE用語集
+（なければ #勉強ログ）にFE用語集から選ぶ。
 「意味を見る」で意味を開き、そのまま単語帳と同じ自己評価を付けられる。
-SGを学習中のあいだだけ投稿する。ボタンは再起動後も使える。
+ボタンは再起動後も使える。
 """
 
 import sqlite3
@@ -25,6 +27,7 @@ from studybot.features.presence import presence_user
 from studybot.qualifications import current_qualification
 from studybot.replies import respond_private
 from studybot.sg_glossary import (
+    FE_GLOSSARY_PATH,
     GLOSSARY_PATH,
     GlossaryDataError,
     get_sg_glossary_ratings,
@@ -46,17 +49,35 @@ RATING_BUTTONS = (
 )
 
 
-def _load_entries():
+# 資格 -> (用語集の場所, 投稿するチャンネルの種類)
+WORD_SOURCES = {
+    "SG": (GLOSSARY_PATH, "glossary"),
+    "FE": (FE_GLOSSARY_PATH, "fe_glossary"),
+}
+
+
+def _load_entries(path):
     try:
-        return load_glossary(GLOSSARY_PATH)
+        return load_glossary(path)
     except (OSError, GlossaryDataError) as error:
         print(f"[word] 用語集を読み込めません: {error}")
         return []
 
 
-def build_word_embed(entry, today):
+def word_channel(guild, kind):
+    channel = find_channel(guild, kind)
+    if channel is None and kind != "glossary":
+        # FE用語集のチャンネルがなければ勉強ログに投稿する
+        channel = find_channel(guild, "study_log")
+    return channel
+
+
+def build_word_embed(entry, today, label="SG"):
+    category = entry.category or label
+    if label != "SG":
+        category = f"{label} {category}"
     embed = discord.Embed(
-        title=f"今日の1語（{today.month}/{today.day}）・ {entry.category or 'SG'}",
+        title=f"今日の1語（{today.month}/{today.day}）・ {category}",
         description=f"## {discord.utils.escape_markdown(entry.term)}",
         color=COLOR_DEFAULT,
     )
@@ -115,7 +136,12 @@ class DailyWordView(discord.ui.View):
     async def show_button(self, interaction, button):
         key = word_key_for_message(config.DB_PATH, interaction.message.id)
         entry = next(
-            (entry for entry in _load_entries() if glossary_entry_key(entry) == key),
+            (
+                entry
+                for path, _ in WORD_SOURCES.values()
+                for entry in _load_entries(path)
+                if glossary_entry_key(entry) == key
+            ),
             None,
         )
         if entry is None:
@@ -132,9 +158,11 @@ async def post_daily_words(bot, now=None):
     """今日の1語を投稿する。投稿した数を返す。"""
     now = now or datetime.now(JST)
     today = now.date()
-    if current_qualification(config.DB_PATH).code != "SG":
+    code = current_qualification(config.DB_PATH).code
+    if code not in WORD_SOURCES:
         return 0
-    entries = _load_entries()
+    path, channel_kind = WORD_SOURCES[code]
+    entries = _load_entries(path)
     if not entries:
         return 0
     user_id = presence_user(config.DB_PATH)
@@ -151,12 +179,12 @@ async def post_daily_words(bot, now=None):
 
     posted = 0
     for guild in bot.guilds:
-        channel = find_channel(guild, "glossary")
+        channel = word_channel(guild, channel_kind)
         if channel is None or posted_today(config.DB_PATH, today, guild.id):
             continue
         try:
             message = await channel.send(
-                embed=build_word_embed(entry, today), view=DailyWordView()
+                embed=build_word_embed(entry, today, code), view=DailyWordView()
             )
         except discord.HTTPException as error:
             print(f"[word] 投稿に失敗: {error}")

@@ -101,11 +101,32 @@ def build_week_embed(rows, today, streak):
     return embed
 
 
+def first_line(text, limit=60):
+    line = (text or "").strip().splitlines()[0] if text and text.strip() else ""
+    return line if len(line) <= limit else line[:limit - 1] + "…"
+
+
 def build_vc_summary_embed(
     display_name, session_seconds, today_seconds, week_rows, today,
     streak, countdown=None, log_channel_label="#勉強ログ", extra_fields=(),
+    compact=False,
 ):
     week_seconds = sum(seconds for _, seconds in week_rows)
+    if compact:
+        # スマホ向け：数行にまとめ、曜日ごとの推移は省く
+        lines = [
+            f"今回 **{format_minutes(session_seconds)}** ・ 今日 {format_minutes(today_seconds)}"
+            f" ・ 今週 {format_minutes(week_seconds)}",
+            f"🔥 連続 {streak}日",
+        ]
+        lines.extend(f"{name}：{first_line(value)}" for name, value in extra_fields)
+        if countdown:
+            lines.append(countdown)
+        return discord.Embed(
+            title=f"{safe_text(display_name, 64)}さん、勉強おつかれさま",
+            description="\n".join(lines),
+            color=COLOR_DEFAULT,
+        )
     embed = discord.Embed(
         title=f"{safe_text(display_name, 64)}さん、勉強おつかれさま",
         description=(

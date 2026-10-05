@@ -388,7 +388,7 @@ class DailyWordTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
         guild.glossary.send = send
         bot = SimpleNamespace(guilds=[guild])
         now = datetime(2026, 10, 15, 7, 30, tzinfo=config.JST)
-        with patch.object(word_feature, "_load_entries", _entries):
+        with patch.object(word_feature, "_load_entries", lambda path: _entries()):
             self.assertEqual(await word_feature.post_daily_words(bot, now), 1)
             self.assertEqual(await word_feature.post_daily_words(bot, now), 0)
             self.assertTrue(posted_today(self.db_path, TODAY, 1))
@@ -411,10 +411,32 @@ class DailyWordTests(_TempDBCase, unittest.IsolatedAsyncioTestCase):
             list(get_sg_glossary_ratings(self.db_path, 7, [entry]).values()), ["まだ要復習"]
         )
 
-    async def test_only_while_learning_sg(self):
+    async def test_follows_current_qualification(self):
         from studybot.exam_results import advance_roadmap
         advance_roadmap(self.db_path, "SG")
-        with patch.object(word_feature, "_load_entries", _entries):
+        guild = _Guild()
+        message = SimpleNamespace(id=556)
+
+        async def send(content=None, **kwargs):
+            guild.log.sent.append(dict(kwargs, content=content))
+            return message
+
+        guild.log.send = send
+        loaded = []
+
+        def load(path):
+            loaded.append(path.name)
+            return _entries()
+
+        # FEを学習中なら、FE用語集から選んで #FE用語集（なければ #勉強ログ）に投稿する
+        with patch.object(word_feature, "_load_entries", load):
+            self.assertEqual(await word_feature.post_daily_words(SimpleNamespace(guilds=[guild])), 1)
+        self.assertEqual(loaded, ["fe_glossary.json"])
+        self.assertIn("FE ", guild.log.sent[0]["embed"].title)
+        self.assertEqual(guild.glossary.sent, [])
+
+        advance_roadmap(self.db_path, "FE")   # 医療情報技師には用語集がない
+        with patch.object(word_feature, "_load_entries", load):
             self.assertEqual(await word_feature.post_daily_words(SimpleNamespace(guilds=[_Guild()])), 0)
         self.assertTrue(word_feature.is_daily_word_due(datetime(2026, 10, 15, 8, 0)))
         self.assertFalse(word_feature.is_daily_word_due(datetime(2026, 10, 15, 7, 0)))

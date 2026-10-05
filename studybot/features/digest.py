@@ -20,6 +20,7 @@ from studybot.daily_digest import (
     digest_datetime,
     get_digest_candidates,
     get_home_guild_id,
+    is_compact_display,
     mark_digest_sent,
     take_rest_day,
 )
@@ -29,7 +30,7 @@ from studybot.checklist import (
     format_checklist,
     save_checklist,
 )
-from studybot.embeds import build_digest_embed, build_plan_status_embed
+from studybot.embeds import first_line, build_digest_embed, build_plan_status_embed
 from studybot.exam_prep import get_exam_prep
 from studybot.exam_results import FINAL_STRETCH_DAYS
 from studybot.habits import format_goal_progress, goal_for_day
@@ -58,10 +59,30 @@ from studybot.stats import (
 # ============================================================
 
 class DailyDigestView(discord.ui.View):
-    """押した本人のデータで動くので、だれが押しても安全。"""
+    """押した本人のデータで動くので、だれが押しても安全。
 
-    def __init__(self):
+    compact=False のときは「詳しく見る」ボタンを外す（ふつう表示では不要）。
+    Botの起動時は全部のボタン付きで登録し、どちらの投稿のボタンも動くようにする。
+    """
+
+    def __init__(self, compact=True):
         super().__init__(timeout=None)
+        if not compact:
+            self.remove_item(self.detail_button)
+
+    @discord.ui.button(
+        label="詳しく見る",
+        style=discord.ButtonStyle.success,
+        custom_id="studybot:digest:detail",
+    )
+    async def detail_button(self, interaction, button):
+        embed = build_daily_digest_embed(
+            interaction.user.id, datetime.now(JST).date(), save=False
+        )
+        if embed is None:
+            await respond_private(interaction, "今日の学習メニューはありません。")
+        else:
+            await respond_private(interaction, embed=embed)
 
     @discord.ui.button(
         label="復習を始める",
@@ -143,7 +164,8 @@ def weakest_category(user_id, qualification):
     return weak[0][0] if weak else None
 
 
-def build_daily_digest_embed(user_id, today):
+def build_daily_digest_embed(user_id, today, save=True, compact=False):
+    """学習メニュー。save=False ならチェックリストを保存しない（表示し直すとき）。"""
     # 復習はすべての資格の分、計画と弱い分野は今学習中の資格の分
     qualification = current_qualification(config.DB_PATH)
     due_items = get_sg_mistakes(
@@ -212,9 +234,38 @@ def build_daily_digest_embed(user_id, today):
             config.DB_PATH, user_id, today, checklist_items
         )),
     )
-    if embed is not None and checklist_items:
+    if embed is not None and checklist_items and save:
         save_checklist(config.DB_PATH, user_id, today, checklist_items)
+    if embed is not None and compact:
+        return compact_digest_embed(embed)
     return embed
+
+
+# コンパクト表示で本文に残す行（試験日・連続日数のほか、予想得点と目標）
+COMPACT_KEEP_PREFIXES = ("🔥", "📈", "🎯", "📍")
+
+
+def compact_digest_embed(embed):
+    """スマホ向けに、学習メニューを数行にまとめる。詳しくは「詳しく見る」で開く。"""
+    description = embed.description or ""
+    lines = [
+        line for index, line in enumerate(description.splitlines())
+        if index == 0 or line.startswith(COMPACT_KEEP_PREFIXES)
+    ]
+    for field in embed.fields:
+        if field.name == "今日のチェックリスト":
+            items = field.value.splitlines()
+            done = sum(1 for item in items if item.startswith("✅"))
+            lines.append(f"☑ チェックリスト {done}/{len(items)}")
+        elif field.name.startswith("今日の復習"):
+            lines.append(f"📝 {field.name}")
+        else:
+            lines.append(f"**{field.name}**：{first_line(field.value)}")
+    compact = discord.Embed(
+        title=embed.title, description="\n".join(lines), color=embed.color
+    )
+    compact.set_footer(text="「詳しく見る」で全部表示 ・ 表示は /plan notify で変更")
+    return compact
 
 
 def exam_day_lines(user_id, target):
@@ -290,7 +341,8 @@ async def find_home_channel(bot, user_id, kind="study_log"):
 
 async def send_daily_digest(bot, user_id, today, now=None):
     """1人分を送る。送れたら True。"""
-    embed = build_daily_digest_embed(user_id, today)
+    compact = is_compact_display(config.DB_PATH, user_id)
+    embed = build_daily_digest_embed(user_id, today, compact=compact)
     if embed is None:
         return False
 
@@ -309,7 +361,7 @@ async def send_daily_digest(bot, user_id, today, now=None):
     message = await channel.send(
         content=f"<@{user_id}> {greeting}",
         embed=embed,
-        view=DailyDigestView(),
+        view=DailyDigestView(compact=compact),
         allowed_mentions=discord.AllowedMentions(
             users=[discord.Object(id=user_id)]
         ),

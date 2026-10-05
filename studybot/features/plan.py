@@ -14,7 +14,12 @@ from studybot.config import (
     JST,
     WEEKLY_REPORT_TIME,
 )
-from studybot.daily_digest import is_digest_enabled, set_digest_enabled
+from studybot.daily_digest import (
+    is_compact_display,
+    is_digest_enabled,
+    set_compact_display,
+    set_digest_enabled,
+)
 from studybot.embeds import build_plan_status_embed
 from studybot.exam_schedule import (
     format_exam_countdown,
@@ -365,13 +370,23 @@ def _notify_schedule_text(guild):
 @app_commands.describe(
     menu="学習メニュー（平日の夜・土日祝の朝）",
     report="週間レポート（日曜の夜）",
+    display="学習メニューと退出通知の表示（コンパクトはスマホ向け）",
 )
-@app_commands.choices(menu=ON_OFF_CHOICES, report=ON_OFF_CHOICES)
-async def plan_notify(ctx, menu: str | None = None, report: str | None = None):
+@app_commands.choices(menu=ON_OFF_CHOICES, report=ON_OFF_CHOICES, display=[
+    app_commands.Choice(name="ふつう", value="normal"),
+    app_commands.Choice(name="コンパクト", value="compact"),
+])
+async def plan_notify(ctx, menu: str | None = None, report: str | None = None,
+                      display: str | None = None):
     for value in (menu, report):
         if value not in (None, "on", "off"):
             await send_private(ctx, "on か off を指定してください。")
             return
+    if display not in (None, "normal", "compact"):
+        await send_private(ctx, "表示は「ふつう」か「コンパクト」を選んでください。")
+        return
+    if display is not None:
+        set_compact_display(config.DB_PATH, ctx.author.id, display == "compact")
 
     if menu is not None:
         set_digest_enabled(config.DB_PATH, ctx.author.id, menu == "on")
@@ -384,15 +399,17 @@ async def plan_notify(ctx, menu: str | None = None, report: str | None = None):
         return "オン" if enabled else "オフ"
 
     lines = []
-    if menu is None and report is None:
+    if menu is None and report is None and display is None:
         lines.append(
-            "`/plan notify menu:オフ` や `report:オン` で切り替えられます。"
+            "`/plan notify menu:オフ` や `report:オン`、"
+            "`display:コンパクト` で切り替えられます。"
         )
     else:
         lines.append("通知の設定を変更しました。")
     lines.append(
         f"学習メニュー：**{state(is_digest_enabled(config.DB_PATH, ctx.author.id))}**"
         f"　週間レポート：**{state(is_weekly_report_enabled(config.DB_PATH, ctx.author.id))}**"
+        f"　表示：**{'コンパクト' if is_compact_display(config.DB_PATH, ctx.author.id) else 'ふつう'}**"
     )
     lines.append(_notify_schedule_text(ctx.guild))
     await send_private(ctx, "\n".join(lines))

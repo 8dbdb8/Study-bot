@@ -24,6 +24,7 @@ from studybot.features import (
     focus,
     glossary,
     health,
+    mock_timer,
     notes,
     plan,
     presence,
@@ -121,6 +122,7 @@ def create_bot():
             bot.add_view(exam_result.ExamResultView())
             bot.add_view(exam_prep.ExamPrepView())
             bot.add_view(daily_word.DailyWordView())
+            bot.add_view(qualification.MockFinishView())
             digest.daily_digest_loop.start(bot)
             weekly_report.weekly_report_loop.start(bot)
             weekly_report.notion_save_loop.start(bot)
@@ -130,6 +132,9 @@ def create_bot():
             daily_word.daily_word_loop.start(bot)
             started = True
             await focus.resume_focus_timers(bot)
+            await mock_timer.resume_mock_timers(
+                bot, qualification.MockFinishView
+            )
             await health.check_and_notify(bot)
 
         now = datetime.now(config.JST)
